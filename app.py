@@ -150,10 +150,11 @@ def load_data():
         return None
 
 # ==========================================
-# 4. 风味星图 (雷达图) 渲染模块 - 终极汉化版
+# 4. 风味星图渲染 (请完整替换此部分)
 # ==========================================
-
-    # 1. 定义六大风味维度及其汉化映射（这些关键词对应 flavor_profiles 里的英文）
+    st.markdown("### 📊 风味维度星图")
+    
+    # 1. 定义映射关系（防止变量未定义报错）
     flavor_dim_map = {
         "sweet": "甜美度",
         "roasted": "烘焙感",
@@ -162,77 +163,68 @@ def load_data():
         "woody": "木质调",
         "spicy": "辛辣感"
     }
-    
     dims_eng = list(flavor_dim_map.keys())
     dims_cn = list(flavor_dim_map.values())
     
+    # 2. 创建画布
     fig = go.Figure()
     
-    # 2. 遍历选中的食材，计算每个维度的得分
-    for name in selected:
-        # 获取该食材的风味 profile 文本
-        profile_text = str(df[df['name'] == name]['flavor_profiles'].values[0]).lower()
-        
-        # 【核心逻辑】：关键词感官映射算法
-        # 逻辑：如果文本包含关键词，给一个基础分(4.0)，每多出现一次加(1.5)，上限10分
-        values = []
-        for eng_key in dims_eng:
-            count = profile_text.count(eng_key)
-            if count > 0:
-                score = min(10.0, 4.0 + (count - 1) * 1.5)
-            else:
-                # 即使没匹配到，也给一个极小的基础分(1.5)，防止图形萎缩成一个点
-                score = 1.5
-            values.append(score)
-        
-        # 闭合雷达图（首尾相连）
-        values.append(values[0])
-        labels_with_closure = dims_cn + [dims_cn[0]]
-        
-        # 获取汉化名称
-        chinese_name = agent.name_map.get(name, name)
-        
-        # 3. 添加到图表
-        fig.add_trace(go.Scatterpolar(
-            r=values,
-            theta=labels_with_closure,
-            fill='toself',
-            name=f"✨ {chinese_name}",
-            hovertemplate=f"<b>{chinese_name}</b><br>强度: %{{r}}<extra></extra>",
-            line=dict(width=3)
-        ))
+    if len(selected) > 0:
+        for name in selected:
+            # 安全获取数据
+            row = df[df['name'] == name]
+            if row.empty:
+                continue
+                
+            # 提取风味描述文本
+            profile_text = str(row['flavor_profiles'].values[0]).lower()
+            
+            # 算法：根据关键词出现频率计算 0-10 的分值
+            values = []
+            for eng_key in dims_eng:
+                count = profile_text.count(eng_key)
+                if count > 0:
+                    # 匹配到关键词，基础分4分，每多一个描述+1.5分
+                    score = min(10.0, 4.0 + (count - 1) * 1.5)
+                else:
+                    # 视觉保底分，防止图形塌陷
+                    score = 1.5
+                values.append(score)
+            
+            # 闭合曲线
+            values.append(values[0])
+            labels_with_closure = dims_cn + [dims_cn[0]]
+            
+            # 获取汉化名称（调用 agent 实例）
+            # 注意：这里假设你的 agent 实例名叫 agent
+            cn_name = agent.name_map.get(name, name)
+            
+            # 添加轨迹
+            fig.add_trace(go.Scatterpolar(
+                r=values,
+                theta=labels_with_closure,
+                fill='toself',
+                name=f"✨ {cn_name}",
+                line=dict(width=3)
+            ))
     
-    # 4. 实验室风格布局美化
-    fig.update_layout(
-        polar=dict(
-            radialaxis=dict(
-                visible=True,
-                range=[0, 10],           # 统一刻度 0-10
-                showticklabels=False,    # 隐藏数字刻度，保持专业感
-                gridcolor="#E5E5E5",     # 浅灰色网格
+        # 3. 样式美化
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 10], showticklabels=False, gridcolor="#E5E5E5"),
+                angularaxis=dict(gridcolor="#E5E5E5", tickfont=dict(size=14))
             ),
-            angularaxis=dict(
-                gridcolor="#E5E5E5",
-                tickfont=dict(size=14, color="#333", family="PingFang SC")
-            ),
-            bgcolor="rgba(255,255,255,0)"
-        ),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.2,
-            xanchor="center",
-            x=0.5
-        ),
-        margin=dict(l=50, r=50, t=30, b=30),
-        height=450,
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-    )
-    
-    # 在 Streamlit 中显示
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            showlegend=True,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=450,
+            margin=dict(l=50, r=50, t=30, b=30)
+        )
+        
+        # 4. 渲染图表
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    else:
+        st.info("请在左侧选择食材以生成风味星图")
 # ==========================================
 # 5. 主界面
 # ==========================================
