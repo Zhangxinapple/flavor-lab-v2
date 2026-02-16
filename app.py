@@ -150,63 +150,89 @@ def load_data():
         return None
 
 # ==========================================
-# 4. 创建雷达图（核心功能）
+# 4. 风味星图 (雷达图) 渲染模块 - 终极汉化版
 # ==========================================
-def create_radar_chart(profile_text):
-    """创建风味雷达图"""
-    # 定义6个维度
-    dimensions = {
-        "🌿草本": ["green", "herb", "grass", "leaf"],
-        "🍎果香": ["fruit", "berry", "citrus", "apple"],
-        "🔥烘焙": ["roast", "toast", "bake", "coffee"],
-        "🌍大地": ["earth", "wood", "must", "soil"],
-        "🌶️辛辣": ["spicy", "pepper", "hot", "pungent"],
-        "🧈油脂": ["fatty", "butter", "cream", "oil"]
+
+    # 1. 定义六大风味维度及其汉化映射（这些关键词对应 flavor_profiles 里的英文）
+    flavor_dim_map = {
+        "sweet": "甜美度",
+        "roasted": "烘焙感",
+        "fruity": "果香值",
+        "herbaceous": "草本力",
+        "woody": "木质调",
+        "spicy": "辛辣感"
     }
     
-    # 计算每个维度的分数
-    values = []
-    profile_lower = str(profile_text).lower()
+    dims_eng = list(flavor_dim_map.keys())
+    dims_cn = list(flavor_dim_map.values())
     
-    for dim, keywords in dimensions.items():
-        score = 0
-        for keyword in keywords:
-            score += profile_lower.count(keyword) * 2.5
-        values.append(min(score, 10))  # 最大10分
+    fig = go.Figure()
     
-    # 如果全是0，设置最小值避免图表为空
-    if sum(values) == 0:
-        values = [1, 1, 1, 1, 1, 1]
+    # 2. 遍历选中的食材，计算每个维度的得分
+    for name in selected:
+        # 获取该食材的风味 profile 文本
+        profile_text = str(df[df['name'] == name]['flavor_profiles'].values[0]).lower()
+        
+        # 【核心逻辑】：关键词感官映射算法
+        # 逻辑：如果文本包含关键词，给一个基础分(4.0)，每多出现一次加(1.5)，上限10分
+        values = []
+        for eng_key in dims_eng:
+            count = profile_text.count(eng_key)
+            if count > 0:
+                score = min(10.0, 4.0 + (count - 1) * 1.5)
+            else:
+                # 即使没匹配到，也给一个极小的基础分(1.5)，防止图形萎缩成一个点
+                score = 1.5
+            values.append(score)
+        
+        # 闭合雷达图（首尾相连）
+        values.append(values[0])
+        labels_with_closure = dims_cn + [dims_cn[0]]
+        
+        # 获取汉化名称
+        chinese_name = agent.name_map.get(name, name)
+        
+        # 3. 添加到图表
+        fig.add_trace(go.Scatterpolar(
+            r=values,
+            theta=labels_with_closure,
+            fill='toself',
+            name=f"✨ {chinese_name}",
+            hovertemplate=f"<b>{chinese_name}</b><br>强度: %{{r}}<extra></extra>",
+            line=dict(width=3)
+        ))
     
-    # 创建雷达图
-    fig = go.Figure(data=go.Scatterpolar(
-        r=values,
-        theta=list(dimensions.keys()),
-        fill='toself',
-        line=dict(color='#0071e3', width=2),
-        fillcolor='rgba(0,113,227,0.2)'
-    ))
-    
+    # 4. 实验室风格布局美化
     fig.update_layout(
         polar=dict(
             radialaxis=dict(
                 visible=True,
-                range=[0, 10],
-                showticklabels=False,
-                ticks='',
-                gridcolor='rgba(0,0,0,0.1)'
+                range=[0, 10],           # 统一刻度 0-10
+                showticklabels=False,    # 隐藏数字刻度，保持专业感
+                gridcolor="#E5E5E5",     # 浅灰色网格
             ),
-            bgcolor='rgba(0,0,0,0.02)'
+            angularaxis=dict(
+                gridcolor="#E5E5E5",
+                tickfont=dict(size=14, color="#333", family="PingFang SC")
+            ),
+            bgcolor="rgba(255,255,255,0)"
         ),
-        showlegend=False,
-        height=200,
-        margin=dict(t=30, b=20, l=30, r=30),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.2,
+            xanchor="center",
+            x=0.5
+        ),
+        margin=dict(l=50, r=50, t=30, b=30),
+        height=450,
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)'
+        plot_bgcolor='rgba(0,0,0,0)',
     )
     
-    return fig
-
+    # 在 Streamlit 中显示
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 # ==========================================
 # 5. 主界面
 # ==========================================
