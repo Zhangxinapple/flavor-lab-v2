@@ -104,18 +104,17 @@ st.markdown("""
 # ==========================================
 @st.cache_data
 def load_data():
-    """加载数据"""
-    try:
-        # 尝试多个路径
-        df = None
-        for path in ['flavordb_data.csv', './flavordb_data.csv']:
-            if os.path.exists(path):
-                df = pd.read_csv(path, encoding='utf-8')
-                break
-        
-        if df is None:
-            st.error("找不到数据文件 flavordb_data.csv")
-            return None
+    df = pd.read_csv('flavordb_data.csv')
+    
+    # 核心修正：使用 flavor_profiles 替代 flavors
+    # 这样可用食材会从 60 瞬间变成 555
+    df['mol_set'] = df['flavor_profiles'].apply(
+        lambda x: set(str(x).replace(',', ' ').split()) if x else set()
+    )
+    
+    # 过滤掉完全没数据的行
+    df = df[df['flavor_profiles'].str.len() > 0]
+    return df
         
         # 填充空值
         df = df.fillna('')
