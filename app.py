@@ -246,7 +246,10 @@ def load_data():
         )
         
         # 只保留有风味描述的食材
-        df = df[df['flavor_profiles'].str.len() > 0]
+        # 使用更安全的过滤方法
+        df['profile_len'] = df['flavor_profiles'].astype(str).apply(len)
+        df = df[df['profile_len'] > 0].copy()
+        df = df.drop(columns=['profile_len'])
         
         # 创建显示名称
         df['display_name'] = df.apply(
