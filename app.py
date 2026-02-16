@@ -74,7 +74,7 @@ class TasteWormholeAgent:
         </div>
         """
 
-ai = TasteWormholeAgent()
+agent = TasteWormholeAgent()
 
 # ==========================================
 # 2. 页面配置
@@ -154,17 +154,52 @@ def load_data():
 # ==========================================
     st.markdown("### 📊 风味维度星图")
     
-    # 1. 定义映射关系（防止变量未定义报错）
+    # 定义雷达图维度
     flavor_dim_map = {
-        "sweet": "甜美度",
-        "roasted": "烘焙感",
-        "fruity": "果香值",
-        "herbaceous": "草本力",
-        "woody": "木质调",
-        "spicy": "辛辣感"
+        "sweet": "甜美度", "roasted": "烘焙感", "fruity": "果香值",
+        "herbaceous": "草本力", "woody": "木质调", "spicy": "辛辣感"
     }
     dims_eng = list(flavor_dim_map.keys())
     dims_cn = list(flavor_dim_map.values())
+    
+    if len(selected) > 0:
+        fig = go.Figure()
+        for name in selected:
+            row = df[df['name'] == name]
+            if row.empty: continue
+                
+            profile_text = str(row['flavor_profiles'].values[0]).lower()
+            
+            # 数值映射算法
+            values = []
+            for eng_key in dims_eng:
+                count = profile_text.count(eng_key)
+                score = min(10.0, 4.0 + (count - 1) * 2.5) if count > 0 else 1.5
+                values.append(score)
+            
+            # 闭合雷达图
+            values.append(values[0])
+            labels_cn = dims_cn + [dims_cn[0]]
+            
+            # 关键修复点：使用安全的 get 方法获取中文名
+            cn_label = agent.name_map.get(name, name)
+            
+            fig.add_trace(go.Scatterpolar(
+                r=values, theta=labels_cn, fill='toself', name=f"✨ {cn_label}"
+            ))
+    
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 10], showticklabels=False),
+                angularaxis=dict(tickfont=dict(size=14))
+            ),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=450
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("请在左侧侧边栏选择食材")
     
     # 2. 创建画布
     fig = go.Figure()
