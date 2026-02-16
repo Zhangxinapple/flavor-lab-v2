@@ -10,12 +10,19 @@ import os
 class TasteWormholeAgent:
     def __init__(self):
         self.name_map = {
-            "coffee": "咖啡", "dark chocolate": "黑巧克力", "green tea": "绿茶", 
-            "strawberry": "草莓", "apple": "苹果", "banana": "香蕉",
-            "bread": "面包", "butter": "黄油", "cheese": "芝士", "tomato": "番茄",
-            "pork": "猪肉", "beef": "牛肉", "chicken": "鸡肉", "onion": "洋葱",
-            "garlic": "大蒜", "ginger": "生姜", "lemon": "柠檬"
-        }
+        # 基础食材
+        "coffee": "咖啡", "dark chocolate": "黑巧克力", "strawberry": "草莓", 
+        "tomato": "番茄", "garlic": "大蒜", "onion": "洋葱", "ginger": "生姜",
+        "pork": "猪肉", "beef": "牛肉", "chicken": " chicken", "shrimp": "虾",
+        "egg": "鸡蛋", "milk": "牛奶", "butter": "黄油", "cheese": "芝士",
+        # 常见水果
+        "apple": "苹果", "banana": "香蕉", "lemon": "柠檬", "orange": "橙子",
+        "grape": "葡萄", "mango": "芒果", "pineapple": "菠萝",
+        # 风味描述汉化 (这部分最关键，用于雷达图)
+        "herbaceous": "草本", "fruity": "果香", "roasted": "烘焙/焦香", 
+        "woody": "木质", "sweet": "甜美", "spicy": "辛辣", "floral": "花香",
+        "fatty": "油脂", "sour": "酸味", "bitter": "苦味"
+    }
 
     def t(self, text):
         """翻译函数"""
@@ -220,14 +227,20 @@ if df is not None and len(df) > 0:
     with st.sidebar:
         st.markdown("### 🎯 实验控制面板")
         
-        # 食材选择
-        all_items = sorted(df['display_name'].tolist())
-        selected = st.multiselect(
-            "🔬 选择 2-4 种食材开始实验",
-            options=all_items,
-            max_selections=4,
-            help="选择至少2种食材，AI将分析它们之间的风味关联"
-        )
+    # 获取所有食材英文名
+    all_ingredients = sorted(df['name'].tolist())
+    
+    # 创建一个映射函数：如果字典里有中文就显示中文，没有就显示英文
+    def get_chinese_name(eng_name):
+        cn_name = agent.name_map.get(eng_name, eng_name)
+        return f"{cn_name} ({eng_name})" if cn_name != eng_name else eng_name
+    
+    # 修改 multiselect
+    selected = st.sidebar.multiselect(
+        "🔬 选择食材进行穿梭",
+        options=all_ingredients,
+        format_func=get_chinese_name  # 关键点：这一行负责把英文变成中文显示
+    )
         
         st.markdown("---")
         st.markdown("""
