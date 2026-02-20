@@ -198,8 +198,12 @@ def t_note(note: str) -> str:
     return m.get(n) or m.get(note.strip()) or note.strip()
 
 
-def t_notes_list(profile_str: str, top_n: int = 999) -> list:
-    raw = [n.strip().lower() for n in str(profile_str).split(",") if n.strip()]
+def t_notes_list(mol_input, top_n: int = 999) -> list:
+    import re as _re2
+    if isinstance(mol_input, set):
+        raw = sorted(mol_input)
+    else:
+        raw = [n.strip().lower() for n in _re2.split(r"[@,]+", str(mol_input)) if n.strip()]
     seen, result = set(), []
     for item in (t_note(n) for n in raw):
         if item not in seen:
@@ -216,7 +220,24 @@ def display_name(name: str) -> str:
 
 # ================================================================
 # 3. 数据加载
+#    数据库有两个风味列，需要同时解析后取并集：
+#    - flavor_profiles：逗号分隔，50条（主要是酒类/烘焙）
+#    - flavors：@ 和 , 混合分隔，501条（绝大多数食材）
 # ================================================================
+import re as _re
+
+def _parse_fp(s) -> set:
+    """解析 flavor_profiles 列（逗号分隔）"""
+    if not s or str(s).strip() in ("", "nan"):
+        return set()
+    return set(t.strip().lower() for t in str(s).split(",") if t.strip())
+
+def _parse_fl(s) -> set:
+    """解析 flavors 列（@ 和 , 混合分隔）"""
+    if not s or str(s).strip() in ("", "nan"):
+        return set()
+    return set(t.strip().lower() for t in _re.split(r"[@,]+", str(s)) if t.strip())
+
 @st.cache_data
 def load_data():
     path = "flavordb_data.csv"
@@ -224,11 +245,16 @@ def load_data():
         return None
     df = pd.read_csv(path)
     df["flavor_profiles"] = df["flavor_profiles"].fillna("")
-    df = df[df["flavor_profiles"].str.len() > 2].copy()
-    df["mol_set"] = df["flavor_profiles"].apply(
-        lambda x: set(n.strip().lower() for n in x.split(",") if n.strip())
-    )
+
+    # 核心修复：合并两列取并集，解锁全部 551 种食材
+    def merge_mol(row):
+        return _parse_fp(row["flavor_profiles"]) | _parse_fl(row.get("flavors", ""))
+
+    df["mol_set"] = df.apply(merge_mol, axis=1)
     df["mol_count"] = df["mol_set"].apply(len)
+
+    # 只保留有风味数据的行
+    df = df[df["mol_count"] > 0].copy()
     return df
 
 
@@ -537,7 +563,7 @@ def main():
         st.markdown("<h4 style='color:#111827'>🧪 风味指纹</h4>", unsafe_allow_html=True)
         for i, name in enumerate(selected):
             cn = t_ingredient(name)
-            notes_cn = t_notes_list(str(rows[name]["flavor_profiles"]), top_n=10)
+            notes_cn = t_notes_list(rows[name]["mol_set"], top_n=10)
             pct = int(ratios.get(name, 1/len(selected))*100)
             cls = TAG_CLASSES[i % len(TAG_CLASSES)]
             dom = ""
@@ -572,8 +598,8 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         elif sim["type"] == "contrast":
-            a3 = " / ".join(t_notes_list(str(rows[n1]["flavor_profiles"]), 3))
-            b3 = " / ".join(t_notes_list(str(rows[n2]["flavor_profiles"]), 3))
+            a3 = " / ".join(t_notes_list(rows[n1]["mol_set"], 3))
+            b3 = " / ".join(t_notes_list(rows[n2]["mol_set"], 3))
             st.markdown(f"""
             <div class="diag diag-ctr">
               <b>⚡ 对比碰撞</b> — 共享分子比例 {jpct}%<br>
@@ -732,7 +758,7 @@ def main():
                 row = rows[name]
                 mc = row["mol_count"]
                 cz = t_category(row["category"])
-                n5 = t_notes_list(str(row["flavor_profiles"]), 5)
+                n5 = t_notes_list(row["mol_set"], 5)
                 cls = TAG_CLASSES[i % len(TAG_CLASSES)]
                 st.markdown(f"""
                 <div class="ing-row" style="margin-bottom:10px">
