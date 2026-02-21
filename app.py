@@ -717,7 +717,7 @@ def main():
             help="粘贴新 Key 可立即覆盖内置配置",
             key="manual_gemini_key")
         # 优先用手动输入，否则用后台配置
-        active_key = manual_key.strip() if manual_key.strip() else _BACKEND_KEY
+        active_key = manual_key.strip() if manual_key.strip() else _active_key
         if active_key:
             label = "（自定义）" if manual_key.strip() else "（内置）"
             st.success(f"✅ AI 顾问就绪 {label}", icon="🔑")
@@ -1028,7 +1028,7 @@ def main():
     st.markdown(f'<h4>🧬 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
 
     # 对话区：active_key 从侧边栏 widget 实时读取
-    active_key = st.session_state.get("manual_gemini_key", "").strip() or _BACKEND_KEY
+    active_key = st.session_state.get("manual_gemini_key", "").strip() or _active_key
     if not active_key:
         st.markdown("""
         <div class="diag diag-info">
