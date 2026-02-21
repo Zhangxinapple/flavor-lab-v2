@@ -4,14 +4,24 @@ import plotly.graph_objects as go
 import json, os, random, math, re
 from math import sqrt
 
-# ── 后台配置（API Key 存于 config.py，不出现在前端）──
-try:
-    import config as _cfg
-    _BACKEND_KEY   = _cfg.GEMINI_API_KEY
-    _GEMINI_MODEL  = _cfg.GEMINI_MODEL
-except Exception:
-    _BACKEND_KEY  = ""
-    _GEMINI_MODEL = "gemini-2.0-flash"
+
+import streamlit as st
+import google.generativeai as genai
+
+# --- 配置 Gemini 安全读取 API Key ---
+def get_api_key():
+    # 优先读取 Streamlit 云端的 Secrets
+    if "GEMINI_API_KEY" in st.secrets:
+        return st.secrets["GEMINI_API_KEY"]
+    # 其次读取你本地可能存在的 config.py
+    try:
+        import config as _cfg
+        return _cfg.GEMINI_API_KEY
+    except:
+        return None
+
+active_key = get_api_key()
+
 
 # ================================================================
 # 0. 页面配置
