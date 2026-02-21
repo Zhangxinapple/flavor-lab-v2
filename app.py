@@ -1,28 +1,33 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import google.generativeai as genai  # 核心：使用官方SDK
+import google.generativeai as genai  # 核心依赖
 import json, os, random, math, re
+from math import sqrt
 
-# --- A. 系统级 Key 读取逻辑 ---
-def get_safe_api_key():
-    # 优先级 1: Streamlit Secrets (部署环境)
-    if "GEMINI_API_KEY" in st.secrets:
-        return st.secrets["GEMINI_API_KEY"]
-    # 优先级 2: config.py (本地开发)
-    try:
-        import config as _cfg
-        if hasattr(_cfg, "GEMINI_API_KEY") and "AIza" in _cfg.GEMINI_API_KEY:
-            return _cfg.GEMINI_API_KEY
-    except:
-        pass
-    return ""
+# --- 系统级 Key 读取逻辑 (闭环方案) ---
+def initialize_system_api():
+    # 1. 尝试从 Streamlit Secrets 读取
+    api_key = st.secrets.get("GEMINI_API_KEY", "")
+    
+    # 2. 如果云端没有，尝试从 config 读取
+    if not api_key or "YOUR_API_KEY" in api_key:
+        try:
+            import config as _cfg
+            api_key = getattr(_cfg, "GEMINI_API_KEY", "")
+        except:
+            pass
+            
+    # 3. 过滤掉占位符
+    if "YOUR_API_KEY" in api_key:
+        api_key = ""
+        
+    return api_key
 
-# 初始化全局变量
-active_key = get_safe_api_key()
-_GEMINI_MODEL = "gemini-2.0-flash" 
+active_key = initialize_system_api()
+_GEMINI_MODEL = "gemini-2.0-flash"
 
-# --- B. 引擎全局配置 (这是你之前缺失的关键一步) ---
+# 初始化 SDK (防止主页因未初始化崩溃)
 if active_key:
     genai.configure(api_key=active_key)
 # ================================================================
@@ -551,47 +556,36 @@ def tech_tip(term):
 # 7. Gemini API 优化对话引擎 (V3.0 取长补短版)
 # ================================================================
 def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """系统性优化版：融合专业Prompt与官方稳定SDK"""
+    """系统化优化版：解决 urllib 导致的 400 错误"""
     if not api_key:
-        return "❌ <b>未检测到 API Key</b>。请在侧边栏或 Secrets 中配置。"
+        return "❌ <b>未检测到有效 API Key</b>。请在侧边栏手动输入或在后台配置 Secrets。"
 
     try:
-        # 使用顶部已配置好的 genai
+        # 使用官方 SDK 模型
         model = genai.GenerativeModel(_GEMINI_MODEL)
         
-        # 1. 注入你设计的专业主厨系统提示词
-        system_prompt = (
-            "你是「风味虫洞」专属 AI 顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
-            "【当前搭配数据】\n" + context + "\n\n"
-            "【你的任务】\n"
-            "1. 基于分子数据帮助用户深入理解食材搭配的科学原理\n"
-            "2. 当用户描述数据库没有的食材时，基于科学知识库估计其分子特征\n"
-            "3. 主动引导思考：主次比例、实际落地方案（如：真空低温、乳化、液氮）\n"
-            "4. 回答风格：专业且亲切的中文，结尾提出一个延伸问题引导探索。"
+        # 构建专业 Prompt
+        system_instruction = (
+            "你是「风味虫洞」专属 AI 顾问。拥有分子烹饪和风味化学背景。\n"
+            "【已知数据】: " + context + "\n"
+            "请基于以上数据回答，风格专业亲切，使用中文。每次回答最后提一个延伸问题。"
         )
 
-        # 2. 构造符合 SDK 要求的对话历史
-        history_for_sdk = []
+        # 转换历史记录格式
+        history_formatted = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
-            history_for_sdk.append({"role": role, "parts": [msg["content"]]})
+            history_formatted.append({"role": role, "parts": [msg["content"]]})
 
-        # 3. 发起请求 (将人设作为第一条指令)
-        full_content = [{"role": "user", "parts": [system_prompt]}] + history_for_sdk
-        
-        response = model.generate_content(
-            full_content,
-            generation_config={"temperature": 0.8, "max_output_tokens": 1024}
-        )
-        
+        # 发起流式或全量请求
+        response = model.generate_content([system_instruction] + history_formatted)
         return response.text
 
     except Exception as e:
-        # 系统性错误捕获
         err_msg = str(e)
-        if "429" in err_msg: return "⚠️ 请求太频繁，AI 顾问正在休息，请稍等一分钟。"
-        if "API_KEY_INVALID" in err_msg: return "❌ API Key 校验失败，请检查密钥是否有效。"
-        return f"⚠️ 助手离线 (错误: {err_msg})"
+        if "429" in err_msg: return "⚠️ AI 顾问太忙了(429)，请稍等片刻。"
+        if "API_KEY_INVALID" in err_msg: return "❌ Key 无效，请检查配置。"
+        return f"⚠️ 助手连接中断: {err_msg}"
 
 
 # 8. 欢迎页
