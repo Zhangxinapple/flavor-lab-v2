@@ -1,42 +1,25 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import google.generativeai as genai  # 确保导入了库
+import google.generativeai as genai
 import json, os, random, math, re
 
-# ================================================================
-# 0. 安全密钥读取逻辑 (兼容云端 Secrets 与本地 config)
-# ================================================================
-def initialize_gemini():
-    # 逻辑 1：优先检查 Streamlit Cloud 的 Secrets
+# --- 1. 核心安全配置：读取 Key ---
+def get_final_key():
+    # 优先读云端 Secrets
     if "GEMINI_API_KEY" in st.secrets:
-        return st.secrets["GEMINI_API_KEY"], st.secrets.get("GEMINI_MODEL", "gemini-2.0-flash")
-    
-    # 逻辑 2：其次检查本地 config.py
+        return st.secrets["GEMINI_API_KEY"]
+    # 其次读 config.py
     try:
         import config as _cfg
-        # 只有当 config.py 里的 key 不是默认占位符时才使用
         if hasattr(_cfg, "GEMINI_API_KEY") and "AIza" in _cfg.GEMINI_API_KEY:
-            return _cfg.GEMINI_API_KEY, getattr(_cfg, "GEMINI_MODEL", "gemini-2.0-flash")
-    except ImportError:
+            return _cfg.GEMINI_API_KEY
+    except:
         pass
+    return ""
 
-    return None, "gemini-2.0-flash"
-
-# 执行初始化
-active_key, active_model_name = initialize_gemini()
-
-if active_key:
-    try:
-        genai.configure(api_key=active_key)
-        # 预定义模型实例供后面调用
-        _MODEL_INST = genai.GenerativeModel(active_model_name)
-    except Exception as e:
-        st.error(f"Gemini 配置失败: {e}")
-        _MODEL_INST = None
-else:
-    _MODEL_INST = None
-
+active_key = get_final_key()
+_GEMINI_MODEL = "gemini-2.0-flash" # 统一模型变量名
 # ================================================================
 # 0. 页面配置
 # ================================================================
