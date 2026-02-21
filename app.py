@@ -559,74 +559,74 @@ def tech_tip(term):
 
 
 # ================================================================
-# 7. Gemini API 对话
+# ================================================================
+# 7. Gemini API 优化对话引擎 (V3.0 取长补短版)
 # ================================================================
 def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """调用 Gemini API，直接接收 api_key 参数，避免 session_state 时序问题"""
-    import urllib.request, urllib.error
-    if not api_key or not api_key.strip():
-        return "❌ <b>未配置 API Key</b>，请在左侧栏输入 Gemini API Key。"
-    key = api_key.strip()
-    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           + _GEMINI_MODEL + ":generateContent?key=" + key)
+    """
+    融合版逻辑：
+    1. 采用官方 SDK (genai) 替代不稳定的 urllib
+    2. 保留原有的专业 Chef Prompt 体系
+    3. 增强了上下文关联能力和错误诊断
+    """
+    import google.generativeai as genai
+    
+    if not api_key or not api_key.strip() or api_key == "YOUR_API_KEY_HERE":
+        return "❌ <b>未配置有效 API Key</b>，请在左侧栏输入或在 Secrets 中配置。"
 
-    system_prompt = (
-        "你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
-        "【当前搭配数据】\n" + context + "\n\n"
-        "【你的任务】\n"
-        "1. 基于上方分子数据帮助用户深入理解食材搭配的科学原理\n"
-        "2. 当用户描述数据库里没有的食材时，用知识库估计其风味分子特征来作答\n"
-        "3. 主动引导用户思考：主食材选择理由、比例调整效果、实际烹饪落地方案\n"
-        "4. 可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例\n"
-        "5. 遇到数据库没有的食材，明确告知并基于知识库分析\n\n"
-        "【回答风格】\n"
-        "- 专业但亲切的中文，像有深度的厨师朋友在交流\n"
-        "- 多用比喻和具体例子\n"
-        "- 每次回答结尾提出一个延伸问题引导用户继续探索"
-    )
-
-    contents = [
-        {"role": "user",  "parts": [{"text": system_prompt + "\n\n请确认你已了解搭配数据，用一句话介绍核心特点，然后提出2个最值得探索的问题。"}]},
-        {"role": "model", "parts": [{"text": "已了解！我是你的风味虫洞顾问，随时准备深度探讨。"}]}
-    ]
-    for msg in messages:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-    body_dict = {
-        "contents": contents,
-        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1024}
-    }
-    payload = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
     try:
-        with urllib.request.urlopen(req, timeout=40) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = e.read().decode("utf-8")
-        except Exception:
-            err_body = ""
-        if e.code == 429:
-            return "⚠️ <b>请求频率超限（429）</b><br>稍等 30 秒后再试，或检查 API 配额是否耗尽。"
-        elif e.code == 400:
-            return "❌ <b>请求格式错误（400）</b><br>详情：" + err_body[:300]
-        elif e.code in (401, 403):
-            return "❌ <b>API Key 无效或无权限（" + str(e.code) + "）</b><br>请确认 Key 正确且 Gemini API 已启用。"
-        elif e.code in (500, 503):
-            return "⚠️ <b>Gemini 服务暂时不可用</b>，请稍后重试。"
+        # 1. 引擎配置
+        genai.configure(api_key=api_key.strip())
+        # 使用你 config 里的模型，如果没有则默认 2.0-flash (目前最快最强)
+        model_name = globals().get('_GEMINI_MODEL', 'gemini-2.0-flash')
+        model = genai.GenerativeModel(model_name)
+
+        # 2. 构造系统指令 (保留并强化了你的原版内容)
+        system_prompt = (
+            "你是「风味虫洞」专属 AI 顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
+            "【当前搭配数据】\n" + context + "\n\n"
+            "【任务要求】\n"
+            "1. 深入分析食材间的分子共鸣（如共享的香气化合物）。\n"
+            "2. 若数据库无此食材，请基于知识库（如：含硫量、挥发性脂肪酸）进行科学模拟。\n"
+            "3. 引导用户思考比例调整与烹饪技法（澄清、球化、真空低温等）。\n"
+            "4. 回答风格：专业且亲切的中文，结尾提出一个延伸问题。\n"
+        )
+
+        # 3. 构造对话流 (适配官方 SDK 格式)
+        # 将历史记录与 System Prompt 结合
+        chat_session = []
+        for msg in messages:
+            role = "user" if msg["role"] == "user" else "model"
+            chat_session.append({"role": role, "parts": [msg["content"]]})
+
+        # 4. 发起调用 (加入安全保护)
+        # 注意：我们将 system_prompt 放在第一条消息的开头，确保 AI 始终记住人设
+        if chat_session:
+            chat_session[0]["parts"][0] = system_prompt + "\n\n" + chat_session[0]["parts"][0]
         else:
-            return "⚠️ HTTP 错误 " + str(e.code) + "：" + err_body[:300]
-    except Exception as ex:
-        err_msg = str(ex)
-        if "timed out" in err_msg.lower() or "timeout" in err_msg.lower():
-            return "⚠️ <b>请求超时</b>，请稍后重试。"
-        return "⚠️ 网络异常：" + err_msg
+            chat_session = [{"role": "user", "parts": [system_prompt + "\n\n你好，请开始我的风味实验报告。"]}]
+
+        response = model.generate_content(
+            chat_session,
+            generation_config={
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "max_output_tokens": 1024,
+            }
+        )
+
+        return response.text
+
+    except Exception as e:
+        err_msg = str(e)
+        # 精准捕获常见错误并返回中文提示
+        if "429" in err_msg:
+            return "⚠️ <b>请求频率超限</b>：免费版每分钟限制较多，请等待 30 秒再试。"
+        if "API_KEY_INVALID" in err_msg or "401" in err_msg:
+            return "❌ <b>API Key 无效</b>：请检查你的 Key 是否正确或已被 Google 停用。"
+        if "quota" in err_msg:
+            return "⚠️ <b>配额耗尽</b>：请检查 Google AI Studio 的使用额度。"
+        return f"⚠️ <b>AI 引擎连接异常</b>：{err_msg}"
 
 
 # 8. 欢迎页
