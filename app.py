@@ -537,63 +537,74 @@ def tech_tip(term):
 # ================================================================
 # 7. Gemini API 对话
 # ================================================================
-def call_gemini(messages: list, context: str) -> str:
-    """调用 Gemini API（Key 从后台 config.py 读取，不暴露在前端）"""
+def call_gemini(api_key: str, messages: list, context: str) -> str:
+    """调用 Gemini API，直接接收 api_key 参数，避免 session_state 时序问题"""
     import urllib.request, urllib.error
-    _key = _BACKEND_KEY
-    if not _key:
-        return "❌ <b>未配置 API Key</b>，请在 config.py 中填写 GEMINI_API_KEY。"
-    url = "https://generativelanguage.googleapis.com/v1beta/models/" + _GEMINI_MODEL + ":generateContent?key=" + _key
-    # 构建系统上下文 + 历史消息
-    system_prompt = f"""你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。
+    if not api_key or not api_key.strip():
+        return "❌ <b>未配置 API Key</b>，请在左侧栏输入 Gemini API Key。"
+    key = api_key.strip()
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           + _GEMINI_MODEL + ":generateContent?key=" + key)
 
-【当前搭配数据】
-{context}
+    system_prompt = (
+        "你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
+        "【当前搭配数据】\n" + context + "\n\n"
+        "【你的任务】\n"
+        "1. 基于上方分子数据帮助用户深入理解食材搭配的科学原理\n"
+        "2. 当用户描述数据库里没有的食材时，用知识库估计其风味分子特征来作答\n"
+        "3. 主动引导用户思考：主食材选择理由、比例调整效果、实际烹饪落地方案\n"
+        "4. 可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例\n"
+        "5. 遇到数据库没有的食材，明确告知并基于知识库分析\n\n"
+        "【回答风格】\n"
+        "- 专业但亲切的中文，像有深度的厨师朋友在交流\n"
+        "- 多用比喻和具体例子\n"
+        "- 每次回答结尾提出一个延伸问题引导用户继续探索"
+    )
 
-【你的任务】
-1. 基于上方的分子数据帮助用户深入理解食材搭配的科学原理
-2. 当用户描述数据库里没有的食材时，用你的知识库估计其风味分子特征来作答
-3. 主动引导用户思考：主食材的选择理由、比例调整的效果、实际烹饪落地方案
-4. 回答要具体有深度，可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例
-5. 如遇到系统数据库没有的食材，明确告知"数据库暂无此食材，以下基于我的知识库分析"
-
-【回答风格】
-- 用专业但亲切的中文，像一位有深度的厨师朋友在交流
-- 避免过于学术，多用比喻和具体例子
-- 每次回答结尾可以提出一个延伸问题引导用户继续探索"""
-
-    contents = [{"role":"user","parts":[{"text": system_prompt + "\n\n请确认你已了解当前搭配数据，用一句话介绍这个搭配的核心特点，然后主动提出2个最值得探索的问题引导我开始对话。"}]},
-                {"role":"model","parts":[{"text":"已了解！我是你的风味虫洞顾问，随时准备就这个搭配的分子奥秘展开深度探讨。"}]}]
+    contents = [
+        {"role": "user",  "parts": [{"text": system_prompt + "\n\n请确认你已了解搭配数据，用一句话介绍核心特点，然后提出2个最值得探索的问题。"}]},
+        {"role": "model", "parts": [{"text": "已了解！我是你的风味虫洞顾问，随时准备深度探讨。"}]}
+    ]
     for msg in messages:
         role = "user" if msg["role"] == "user" else "model"
         contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
-    payload = json.dumps({"contents": contents}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload,
-                                  headers={"Content-Type":"application/json"}, method="POST")
+    body_dict = {
+        "contents": contents,
+        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1024}
+    }
+    payload = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
             return data["candidates"][0]["content"]["parts"][0]["text"]
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = ""
         if e.code == 429:
-            return "⚠️ <b>API Key 已失效或配额耗尽</b><br><br>最常见原因：Key 曾公开暴露后被 Google 自动停用。请前往 <a href=\"https://aistudio.google.com/app/apikey\" target=\"_blank\">Google AI Studio</a> 删除旧 Key 并生成新的，粘贴到左侧栏即可恢复使用。"
-        if e.code == 400 or "API_KEY_INVALID" in body or "INVALID_ARGUMENT" in body:
-            return "❌ <b>请求参数错误</b>，请检查 API 配置。"
-        if e.code == 403:
-            return "❌ <b>API Key 权限不足</b>，请到 Google Cloud Console 确认 Gemini API 已启用。"
-        if e.code == 503 or e.code == 500:
+            return "⚠️ <b>请求频率超限（429）</b><br>稍等 30 秒后再试，或检查 API 配额是否耗尽。"
+        elif e.code == 400:
+            return "❌ <b>请求格式错误（400）</b><br>详情：" + err_body[:300]
+        elif e.code in (401, 403):
+            return "❌ <b>API Key 无效或无权限（" + str(e.code) + "）</b><br>请确认 Key 正确且 Gemini API 已启用。"
+        elif e.code in (500, 503):
             return "⚠️ <b>Gemini 服务暂时不可用</b>，请稍后重试。"
-        return f"⚠️ 服务暂时异常（错误码 {e.code}），请稍后再试。"
-    except Exception as e:
-        err = str(e)
-        if "timed out" in err.lower():
-            return "⚠️ <b>请求超时</b>，Gemini 服务响应较慢，请稍后重试。"
-        return f"⚠️ 连接异常，请检查网络后重试。"
+        else:
+            return "⚠️ HTTP 错误 " + str(e.code) + "：" + err_body[:300]
+    except Exception as ex:
+        err_msg = str(ex)
+        if "timed out" in err_msg.lower() or "timeout" in err_msg.lower():
+            return "⚠️ <b>请求超时</b>，请稍后重试。"
+        return "⚠️ 网络异常：" + err_msg
 
 
-# ================================================================
 # 8. 欢迎页
 # ================================================================
 def render_welcome():
@@ -715,13 +726,21 @@ def main():
 
         st.divider()
 
-        # ── AI 顾问状态（Key 在后台 config.py 中配置）──
+        # ── AI 顾问：config.py 后台 Key + 侧边栏可覆盖 ──
         st.markdown("### 🤖 AI 风味顾问")
-        if _BACKEND_KEY:
-            st.success("✅ AI 顾问已就绪", icon="🧬")
-            st.caption("选择食材后，在页面底部与 AI 对话")
+        manual_key = st.text_input(
+            "Gemini API Key", type="password",
+            placeholder="留空则使用后台内置 Key",
+            help="粘贴新 Key 可立即覆盖内置配置",
+            key="manual_gemini_key")
+        # 优先用手动输入，否则用后台配置
+        active_key = manual_key.strip() if manual_key.strip() else _BACKEND_KEY
+        if active_key:
+            label = "（自定义）" if manual_key.strip() else "（内置）"
+            st.success(f"✅ AI 顾问就绪 {label}", icon="🔑")
         else:
-            st.warning("⚠️ config.py 中未配置 API Key")
+            st.warning("⚠️ 未配置 API Key")
+            st.caption("[获取免费 Gemini Key →](https://aistudio.google.com/app/apikey)")
 
         st.divider()
         st.caption("数据来源：FlavorDB · 551 种食材 · 464 个风味维度")
@@ -1025,8 +1044,16 @@ def main():
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f'<h4>🧬 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
 
-    # 对话区（Key 在后台，无需前端输入）
-    if True:
+    # 对话区：active_key 从侧边栏 widget 实时读取
+    active_key = st.session_state.get("manual_gemini_key", "").strip() or _BACKEND_KEY
+    if not active_key:
+        st.markdown("""
+        <div class="diag diag-info">
+          <b>🔑 请在左侧栏输入 Gemini API Key</b><br>
+          <span><a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#7B2FF7">
+          → 免费获取（Google AI Studio）</a></span>
+        </div>""", unsafe_allow_html=True)
+    else:
         # 初始化对话历史
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
@@ -1101,7 +1128,7 @@ def main():
         for qi, q in enumerate(quick_qs):
             if qcols[qi%2].button(q, key=f"qbtn_{qi}", use_container_width=True):
                 with st.spinner("AI 思考中..."):
-                    resp = call_gemini(st.session_state.chat_history + [{"role":"user","content":q}], context_str)
+                    resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":q}], context_str)
                 st.session_state.chat_history.append({"role":"user","content":q})
                 st.session_state.chat_history.append({"role":"assistant","content":resp})
                 st.rerun()
@@ -1117,7 +1144,7 @@ def main():
             if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
                 if user_input.strip():
                     with st.spinner("AI 思考中..."):
-                        resp = call_gemini(st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
+                        resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
                     st.session_state.chat_history.append({"role":"user","content":user_input})
                     st.session_state.chat_history.append({"role":"assistant","content":resp})
                     st.rerun()
