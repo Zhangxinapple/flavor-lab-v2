@@ -2,36 +2,23 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import google.generativeai as genai
-import json, os, random, math, re
+import json, os, random, math, re, time
+from datetime import datetime
 
 # ================================================================
-# 0. API Key 配置（支持三种方式，优先级从高到低）
+# 0. API Key 配置 - 仅通过 Streamlit Secrets
 # ================================================================
+_GEMINI_MODEL = "gemini-2.0-flash"
+
 def get_api_key():
-    """获取 Gemini API Key，优先级：1.用户输入 2.Secrets 3.config.py"""
-    # 方式1：用户手动输入（通过 session_state 持久化）
-    if "user_gemini_key" in st.session_state and st.session_state.user_gemini_key.strip():
-        return st.session_state.user_gemini_key.strip()
-    
-    # 方式2：Streamlit Secrets（云端部署推荐）
-    if "GEMINI_API_KEY" in st.secrets:
-        key = st.secrets["GEMINI_API_KEY"]
-        if key and "YOUR_API_KEY" not in key and "AIza" in key:
-            return key
-    
-    # 方式3：config.py 本地配置
+    """从 Streamlit Secrets 获取 Gemini API Key"""
     try:
-        import config as _cfg
-        key = getattr(_cfg, "GEMINI_API_KEY", "")
-        if key and "YOUR_API_KEY" not in key and "AIza" in key:
+        key = st.secrets.get("GEMINI_API_KEY", "")
+        if key and "AIza" in key:
             return key
     except:
         pass
-    
     return ""
-
-# 全局配置
-_GEMINI_MODEL = "gemini-2.0-flash"
 
 # ================================================================
 # 1. 页面配置
@@ -44,7 +31,7 @@ st.set_page_config(
 )
 
 # ================================================================
-# 2. 全局样式
+# 2. 全局样式 - 升级版
 # ================================================================
 st.markdown("""
 <style>
@@ -59,6 +46,9 @@ st.markdown("""
   --text-muted:    #6B7280;
   --text-faint:    #9CA3AF;
   --shadow:        0 2px 12px rgba(0,0,0,0.07);
+  --accent-blue:   #00D2FF;
+  --accent-purple: #7B2FF7;
+  --accent-pink:   #FF6B6B;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -164,6 +154,7 @@ st.markdown("""
 .diag-res  { background:#F0FDF4; border-color:#22C55E; }
 .diag-ctr  { background:#FFF7ED; border-color:#F97316; }
 .diag-info { background:#EEF6FF; border-color:#3B82F6; }
+.diag-warn { background:#FEF3C7; border-color:#F59E0B; }
 .pbar-bg   { background:var(--border-color); border-radius:6px; height:7px; overflow:hidden; margin:3px 0; }
 .pbar-fill { height:100%; border-radius:6px; }
 .ing-row {
@@ -173,31 +164,61 @@ st.markdown("""
   padding: 10px 14px;
   margin: 5px 0;
 }
+/* 升级版聊天气泡 */
 .chat-bubble-user {
   background: linear-gradient(135deg,#7B2FF7,#00D2FF);
   color: #fff !important;
-  padding: 10px 16px;
-  border-radius: 16px 16px 4px 16px;
-  margin: 6px 0;
+  padding: 12px 18px;
+  border-radius: 18px 18px 4px 18px;
+  margin: 8px 0;
   display: inline-block;
-  max-width: 85%;
+  max-width: 80%;
   float: right;
   clear: both;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  box-shadow: 0 2px 8px rgba(123,47,247,0.25);
 }
 .chat-bubble-ai {
-  background: var(--bg-card-hover);
+  background: var(--bg-card);
   color: var(--text-primary) !important;
   border: 1px solid var(--border-color);
-  padding: 10px 16px;
-  border-radius: 16px 16px 16px 4px;
-  margin: 6px 0;
+  padding: 12px 18px;
+  border-radius: 18px 18px 18px 4px;
+  margin: 8px 0;
   display: inline-block;
-  max-width: 85%;
+  max-width: 80%;
   float: left;
   clear: both;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
 }
-.chat-clearfix { clear:both; }
-.chat-wrap { max-height:420px; overflow-y:auto; padding:8px 0; }
+.chat-bubble-ai b { color: var(--accent-purple) !important; }
+.chat-clearfix { clear:both; height: 8px; }
+.chat-wrap { max-height: 500px; overflow-y: auto; padding: 12px; background: var(--bg-main); border-radius: 12px; }
+/* 时间戳样式 */
+.chat-time {
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  margin-top: 4px;
+  text-align: right;
+}
+/* 错误提示样式 */
+.chat-error {
+  background: #FEF2F2 !important;
+  border: 1px solid #FECACA !important;
+  color: #DC2626 !important;
+}
+/* 加载动画 */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.loading-dot {
+  animation: pulse 1.5s infinite;
+  display: inline-block;
+}
 .sec-label {
   font-size: .72rem;
   font-weight: 700;
@@ -206,8 +227,34 @@ st.markdown("""
   color: var(--text-faint) !important;
   margin: 14px 0 6px;
 }
+/* API 状态指示器 */
+.api-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+}
+.api-status.ready {
+  background: #D1FAE5;
+  color: #065F46;
+}
+.api-status.error {
+  background: #FEE2E2;
+  color: #991B1B;
+}
 #MainMenu, footer { visibility: hidden; }
 .block-container { padding-top: 1.2rem !important; }
+/* 快捷按钮样式优化 */
+.quick-btn {
+  font-size: 0.85rem !important;
+  white-space: normal !important;
+  height: auto !important;
+  padding: 10px 12px !important;
+  line-height: 1.4 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -339,61 +386,96 @@ def radar_vals(mol_set):
 
 
 # ================================================================
-# 6. Gemini API 调用（使用 SDK 方式，更稳定）
+# 6. Gemini API 调用 - 升级版（带重试机制和缓存）
 # ================================================================
-def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """调用 Gemini API，返回 AI 回复文本"""
-    if not api_key or "YOUR_API_KEY" in api_key or "AIza" not in api_key:
-        return "❌ <b>API Key 未配置或无效</b>。请在左侧栏输入有效的 Gemini API Key。"
-    
+@st.cache_resource
+def get_gemini_model():
+    """缓存 Gemini 模型实例，避免重复初始化"""
+    api_key = get_api_key()
+    if not api_key:
+        return None
     try:
-        # 配置 API Key
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(_GEMINI_MODEL)
-        
-        # 构建系统提示
-        system_prompt = (
-            "你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
-            "【当前搭配数据】\n" + context + "\n\n"
-            "【你的任务】\n"
-            "1. 基于上方分子数据帮助用户深入理解食材搭配的科学原理\n"
-            "2. 当用户描述数据库里没有的食材时，用知识库估计其风味分子特征来作答\n"
-            "3. 主动引导用户思考：主食材选择理由、比例调整效果、实际烹饪落地方案\n"
-            "4. 可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例\n"
-            "5. 遇到数据库没有的食材，明确告知并基于知识库分析\n\n"
-            "【回答风格】\n"
-            "- 专业但亲切的中文，像有深度的厨师朋友在交流\n"
-            "- 多用比喻和具体例子\n"
-            "- 每次回答结尾提出一个延伸问题引导用户继续探索"
-        )
-        
-        # 构建对话内容
-        chat = model.start_chat(history=[])
-        
-        # 先发送系统提示
-        chat.send_message(system_prompt)
-        
-        # 然后发送历史消息
-        for msg in messages:
-            if msg["role"] == "user":
-                response = chat.send_message(msg["content"])
-        
-        return response.text
-        
-    except Exception as e:
-        err_str = str(e)
-        if "429" in err_str:
-            return "⚠️ <b>请求频率超限（429）</b><br>请稍等 30 秒后再试，或检查 API 配额。"
-        elif "API_KEY_INVALID" in err_str or "401" in err_str:
-            return "❌ <b>API Key 无效</b>。请确认 Key 正确且 Gemini API 已启用。"
-        elif "403" in err_str:
-            return "❌ <b>API Key 无权限</b>。请确认已启用 Gemini API。"
-        elif "500" in err_str or "503" in err_str:
-            return "⚠️ <b>Gemini 服务暂时不可用</b>，请稍后重试。"
-        elif "timeout" in err_str.lower():
-            return "⚠️ <b>请求超时</b>，请稍后重试。"
-        else:
-            return f"⚠️ 调用出错: {err_str[:200]}"
+        return genai.GenerativeModel(_GEMINI_MODEL)
+    except:
+        return None
+
+def call_gemini_with_retry(messages: list, context: str, max_retries=3) -> tuple:
+    """调用 Gemini API，带智能重试机制
+    
+    Returns:
+        (success: bool, result: str, is_rate_limit: bool)
+    """
+    api_key = get_api_key()
+    if not api_key or "AIza" not in api_key:
+        return False, "❌ API Key 未配置。请在 Streamlit Cloud Secrets 中设置 GEMINI_API_KEY。", False
+    
+    model = get_gemini_model()
+    if not model:
+        return False, "❌ 无法初始化 Gemini 模型，请检查 API Key。", False
+    
+    system_prompt = (
+        "你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
+        "【当前搭配数据】\n" + context + "\n\n"
+        "【你的任务】\n"
+        "1. 基于上方分子数据帮助用户深入理解食材搭配的科学原理\n"
+        "2. 当用户描述数据库里没有的食材时，用知识库估计其风味分子特征来作答\n"
+        "3. 主动引导用户思考：主食材选择理由、比例调整效果、实际烹饪落地方案\n"
+        "4. 可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例\n"
+        "5. 遇到数据库没有的食材，明确告知并基于知识库分析\n\n"
+        "【回答风格】\n"
+        "- 专业但亲切的中文，像有深度的厨师朋友在交流\n"
+        "- 多用比喻和具体例子\n"
+        "- 每次回答结尾提出一个延伸问题引导用户继续探索"
+    )
+    
+    for attempt in range(max_retries):
+        try:
+            # 构建对话历史
+            chat = model.start_chat(history=[])
+            
+            # 发送系统提示
+            chat.send_message(system_prompt)
+            
+            # 发送用户消息历史
+            for msg in messages:
+                if msg["role"] == "user":
+                    response = chat.send_message(msg["content"])
+            
+            return True, response.text, False
+            
+        except Exception as e:
+            err_str = str(e)
+            
+            # 429 频率限制 - 需要等待后重试
+            if "429" in err_str or "Resource has been exhausted" in err_str:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3  # 递增等待时间
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    return False, "⚠️ **请求频率超限（429）**\n\nGemini 免费版 API 有每分钟调用限制。请等待 30-60 秒后重试，或考虑升级到付费版。", True
+            
+            # API Key 无效
+            elif "API_KEY_INVALID" in err_str or "401" in err_str:
+                return False, "❌ **API Key 无效**\n\n请确认 Key 正确且 Gemini API 已在 Google AI Studio 中启用。", False
+            
+            # 权限不足
+            elif "403" in err_str:
+                return False, "❌ **API Key 无权限**\n\n请确认已在 Google AI Studio 中启用 Gemini API。", False
+            
+            # 服务不可用
+            elif "500" in err_str or "503" in err_str:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return False, "⚠️ **Gemini 服务暂时不可用**\n\n请稍后重试。", False
+            
+            # 其他错误
+            else:
+                return False, f"⚠️ **调用出错**: {err_str[:200]}", False
+    
+    return False, "⚠️ 多次尝试后仍无法连接，请稍后重试。", False
 
 
 # ================================================================
@@ -409,6 +491,15 @@ def tags_html(notes, cls="tag-blue", max_n=8):
 
 def shared_tags_html(notes, max_n=10):
     return " ".join(f'<span class="tag tag-shared">⚡ {t_note(n)}</span>' for n in notes[:max_n])
+
+def md_to_html(text: str) -> str:
+    """把 AI 回复的 Markdown 转成 HTML"""
+    import re as _re
+    text = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank" style="color:#7B2FF7">\1</a>', text)
+    text = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = _re.sub(r'(?m)^[\-·]\s+(.+)$', r'<div style="padding:2px 0 2px 12px">• \1</div>', text)
+    text = text.replace("\n", "<br>")
+    return text
 
 
 # ================================================================
@@ -447,7 +538,7 @@ def render_welcome():
         <div class="step-card">
           <div style="font-size:1.6rem">④</div>
           <h4 style="color:var(--text-primary)">AI 深度对话</h4>
-          <p style="color:var(--text-muted);font-size:.85rem">输入 Gemini API Key，与 AI 顾问深度探讨</p>
+          <p style="color:var(--text-muted);font-size:.85rem">与 AI 顾问就当前搭配进行专业探讨</p>
         </div>
       </div>
     </div>
@@ -455,7 +546,243 @@ def render_welcome():
 
 
 # ================================================================
-# 9. 主界面
+# 9. 侧边栏 - 升级版（根据 API 状态显示不同内容）
+# ================================================================
+def render_sidebar_api_status():
+    """渲染 API 状态区域"""
+    st.markdown("### 🤖 AI 风味顾问")
+    
+    api_key = get_api_key()
+    
+    if api_key:
+        # API 已配置 - 显示简洁状态
+        st.markdown("""
+        <div class="api-status ready">
+          <span>✅</span>
+          <span>AI 顾问已就绪</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 显示使用提示
+        with st.expander("ℹ️ 使用提示", expanded=False):
+            st.markdown("""
+            **关于 API 调用限制：**
+            - Gemini 免费版有每分钟调用次数限制
+            - 如遇 429 错误，请等待 30-60 秒后重试
+            - 连续对话会消耗更多配额
+            
+            **优化建议：**
+            - 使用快捷问题按钮更高效
+            - 一次提问尽量详细
+            """)
+    else:
+        # API 未配置 - 显示配置指引
+        st.markdown("""
+        <div class="api-status error">
+          <span>⚠️</span>
+          <span>API Key 未配置</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.info("""
+        **配置方法：**
+        
+        1. 访问 [Google AI Studio](https://aistudio.google.com/app/apikey)
+        2. 创建 API Key
+        3. 在 Streamlit Cloud 中：
+           - 点击 **⋮** → **Settings**
+           - 选择 **Secrets**
+           - 添加：`GEMINI_API_KEY = "你的Key"`
+        4. 重启应用
+        """)
+    
+    st.divider()
+
+
+# ================================================================
+# 10. AI 对话区 - 升级版（修复循环问题）
+# ================================================================
+def render_chat_section(api_key, cn1, cn2, selected, ratios, build_context):
+    """渲染 AI 对话区"""
+    st.markdown("---")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f'<h4>🤖 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
+    
+    if not api_key:
+        st.markdown("""
+        <div class="diag diag-info">
+          <b>🔑 AI 顾问未激活</b><br><br>
+          <span>请在 Streamlit Cloud Secrets 中配置 GEMINI_API_KEY 以启用 AI 对话功能。</span><br><br>
+          <span><a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#7B2FF7">
+          → 免费获取 Gemini Key</a></span>
+        </div>""", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    
+    # 初始化 session state
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if "chat_context_key" not in st.session_state:
+        st.session_state.chat_context_key = ""
+    if "last_api_error" not in st.session_state:
+        st.session_state.last_api_error = None
+    
+    # 检测食材变化，重置对话
+    current_key = "+".join(sorted(selected))
+    if st.session_state.chat_context_key != current_key:
+        st.session_state.chat_history = []
+        st.session_state.chat_context_key = current_key
+        st.session_state.last_api_error = None
+    
+    context_str = build_context()
+    
+    # 渲染历史消息
+    if st.session_state.chat_history:
+        chat_html = '<div class="chat-wrap">'
+        for msg in st.session_state.chat_history:
+            if msg["role"] == "user":
+                chat_html += f'<div class="chat-bubble-user">{msg["content"]}</div>'
+                chat_html += f'<div class="chat-time">{msg.get("time", "")}</div>'
+                chat_html += '<div class="chat-clearfix"></div>'
+            else:
+                is_error = msg.get("is_error", False)
+                bubble_class = "chat-bubble-ai chat-error" if is_error else "chat-bubble-ai"
+                content = md_to_html(msg["content"])
+                chat_html += f'<div class="{bubble_class}">{content}</div>'
+                chat_html += '<div class="chat-clearfix"></div>'
+        chat_html += "</div>"
+        st.markdown(chat_html, unsafe_allow_html=True)
+    else:
+        # 显示引导信息
+        type_hints = {
+            "resonance": f"它们共享大量相同的芳香分子，属于「**同源共振**」型搭配，适合用叠加增强来放大共鸣。",
+            "contrast":  f"它们风味差异显著，属于「**对比碰撞**」型搭配，高明的厨师会用这种张力创造层次感。",
+            "neutral":   f"它们适度交叠互补，属于「**平衡搭档**」型搭配，比例调整是提升这个组合的关键。",
+        }
+        hint_text = type_hints.get(sim["type"], "")
+        st.markdown(f"""
+        <div class="diag diag-res" style="margin-bottom:12px">
+          <b style="font-size:1rem">🧬 关于 {cn1} × {cn2} 这个搭配</b><br><br>
+          <span>{hint_text}</span><br><br>
+          <span style="color:var(--text-muted);font-size:.85rem">
+            💬 <b>你可以问我：</b><br>
+            · 为什么选 {cn1} 作为主食材，而不是其他？<br>
+            · 如果我手边没有 {cn2}，有什么替代方案？<br>
+            · 请帮我设计一道突出这个搭配的完整菜谱
+          </span>
+        </div>""", unsafe_allow_html=True)
+    
+    # 显示之前的错误（如果有）
+    if st.session_state.last_api_error:
+        st.markdown(f"""
+        <div class="diag diag-warn" style="margin: 12px 0;">
+          <b>⚠️ 上次请求遇到问题</b><br>
+          <span>{st.session_state.last_api_error}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # 快捷问题按钮
+    st.markdown("<div style='margin: 16px 0 12px;'>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;'>💡 快捷问题：</div>", unsafe_allow_html=True)
+    
+    n1, n2 = selected[0], selected[1]
+    quick_qs = [
+        f"为什么 {cn1} 要作为主食材？换成其他食材会怎样？",
+        f"用 {cn1} + {cn2} 设计一道完整菜谱，含烹饪步骤",
+        f"当前 {int(ratios.get(n1,0.5)*100)}% vs {int(ratios.get(n2,0.5)*100)}% 的比例是最优的吗？",
+    ]
+    
+    qcols = st.columns(3)
+    for qi, q in enumerate(quick_qs):
+        if qcols[qi].button(q, key=f"qbtn_{qi}", use_container_width=True):
+            # 添加用户消息
+            current_time = datetime.now().strftime("%H:%M")
+            st.session_state.chat_history.append({
+                "role": "user", 
+                "content": q,
+                "time": current_time
+            })
+            st.session_state.last_api_error = None
+            
+            # 调用 API
+            with st.spinner("🤖 AI 思考中..."):
+                success, result, is_rate_limit = call_gemini_with_retry(
+                    [{"role": "user", "content": q}], 
+                    context_str
+                )
+            
+            # 添加 AI 回复
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": result,
+                "is_error": not success
+            })
+            
+            if not success:
+                st.session_state.last_api_error = "API 调用失败，请查看消息详情"
+            
+            st.rerun()
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # 输入框区域
+    st.markdown("<div style='margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-color);'>", unsafe_allow_html=True)
+    
+    user_input = st.text_input(
+        "向风味顾问提问...",
+        placeholder=f"例如：我想了解 {cn1} 和 {cn2} 的最佳烹饪方式...",
+        key="gemini_input", 
+        label_visibility="collapsed")
+    
+    col_send, col_clear = st.columns([4, 1])
+    
+    with col_send:
+        if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
+            if user_input.strip():
+                # 构建完整消息历史
+                msg_history = []
+                for msg in st.session_state.chat_history:
+                    if msg["role"] in ["user", "assistant"] and not msg.get("is_error", False):
+                        msg_history.append({"role": msg["role"], "content": msg["content"]})
+                msg_history.append({"role": "user", "content": user_input.strip()})
+                
+                # 添加用户消息到显示
+                current_time = datetime.now().strftime("%H:%M")
+                st.session_state.chat_history.append({
+                    "role": "user",
+                    "content": user_input.strip(),
+                    "time": current_time
+                })
+                st.session_state.last_api_error = None
+                
+                # 调用 API
+                with st.spinner("🤖 AI 思考中..."):
+                    success, result, is_rate_limit = call_gemini_with_retry(msg_history, context_str)
+                
+                # 添加 AI 回复
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": result,
+                    "is_error": not success
+                })
+                
+                if not success:
+                    st.session_state.last_api_error = "API 调用失败，请查看消息详情"
+                
+                st.rerun()
+    
+    with col_clear:
+        if st.button("🗑️ 清空对话", key="clear_btn", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.last_api_error = None
+            st.rerun()
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ================================================================
+# 11. 主界面
 # ================================================================
 def main():
     df = load_data()
@@ -519,37 +846,10 @@ def main():
                 ratios = {k: v/raw_total for k, v in ratios.items()}
 
         st.divider()
-
-        # ========== AI 顾问配置（修复版）==========
-        st.markdown("### 🤖 AI 风味顾问")
         
-        # 获取当前有效的 key
-        current_key = get_api_key()
+        # 渲染 API 状态区域
+        render_sidebar_api_status()
         
-        # 用户输入框（使用 session_state 持久化）
-        user_input_key = st.text_input(
-            "Gemini API Key",
-            type="password",
-            value=st.session_state.get("user_gemini_key", ""),
-            placeholder="在此输入 API Key 或配置 Secrets",
-            help="支持三种配置方式：1.此处输入 2.Secrets 3.config.py",
-            key="gemini_key_input"
-        )
-        
-        # 保存用户输入到 session_state
-        if user_input_key.strip():
-            st.session_state.user_gemini_key = user_input_key.strip()
-        
-        # 显示当前状态
-        effective_key = get_api_key()
-        if effective_key:
-            source = "（用户输入）" if st.session_state.get("user_gemini_key") else ("（Secrets）" if "GEMINI_API_KEY" in st.secrets else "（config.py）")
-            st.success(f"✅ AI 顾问就绪 {source}", icon="🔑")
-        else:
-            st.warning("⚠️ 未配置 API Key")
-            st.caption("[→ 免费获取 Gemini Key](https://aistudio.google.com/app/apikey)")
-
-        st.divider()
         st.caption("数据来源：FlavorDB · 分子风味科学")
 
     # ========== 未选择足够食材：显示欢迎页 ==========
@@ -814,113 +1114,9 @@ def main():
                 </div>""", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # ========== Gemini AI 对话区（修复版）==========
-    st.markdown("---")
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f'<h4>🤖 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
-
-    # 获取当前有效的 API Key
-    active_key = get_api_key()
-    
-    if not active_key:
-        st.markdown("""
-        <div class="diag diag-info">
-          <b>🔑 请在左侧栏输入 Gemini API Key</b><br>
-          <span><a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#7B2FF7">
-          → 免费获取（Google AI Studio）</a></span>
-        </div>""", unsafe_allow_html=True)
-    else:
-        # 初始化对话历史
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-        if "chat_context_key" not in st.session_state:
-            st.session_state.chat_context_key = ""
-
-        # 如果切换了食材，重置对话
-        current_key = "+".join(sorted(selected))
-        if st.session_state.chat_context_key != current_key:
-            st.session_state.chat_history = []
-            st.session_state.chat_context_key = current_key
-
-        context_str = build_context()
-
-        def md_to_html(text: str) -> str:
-            """把 AI 回复的 Markdown 转成 HTML"""
-            import re as _re
-            text = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank" style="color:#7B2FF7">\1</a>', text)
-            text = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-            text = _re.sub(r'(?m)^[\-·]\s+(.+)$', r'<div style="padding:2px 0 2px 12px">• \1</div>', text)
-            text = text.replace("\n", "<br>")
-            return text
-
-        # 渲染历史消息
-        if st.session_state.chat_history:
-            chat_html = '<div class="chat-wrap">'
-            for msg in st.session_state.chat_history:
-                if msg["role"] == "user":
-                    chat_html += f'<div class="chat-bubble-user">{msg["content"]}</div><div class="chat-clearfix"></div>'
-                else:
-                    content = md_to_html(msg["content"])
-                    chat_html += f'<div class="chat-bubble-ai">{content}</div><div class="chat-clearfix"></div>'
-            chat_html += "</div>"
-            st.markdown(chat_html, unsafe_allow_html=True)
-        else:
-            # 显示引导信息
-            type_hints = {
-                "resonance": f"它们共享大量相同的芳香分子，属于「同源共振」型搭配，适合用叠加增强来放大共鸣。",
-                "contrast":  f"它们风味差异显著，属于「对比碰撞」型搭配，高明的厨师会用这种张力创造层次感。",
-                "neutral":   f"它们适度交叠互补，属于「平衡搭档」型搭配，比例调整是提升这个组合的关键。",
-            }
-            hint_text = type_hints.get(sim["type"], "")
-            st.markdown(f"""
-            <div class="diag diag-res" style="margin-bottom:12px">
-              <b style="font-size:1rem">🧬 关于 {cn1} × {cn2} 这个搭配</b><br><br>
-              <span>{hint_text}</span><br><br>
-              <span style="color:var(--text-muted);font-size:.85rem">
-                💬 <b>你可以问我：</b><br>
-                · 为什么选 {cn1} 作为主食材，而不是其他？<br>
-                · 如果我手边没有 {cn2}，有什么替代方案？<br>
-                · 请帮我设计一道突出这个搭配的完整菜谱
-              </span>
-            </div>""", unsafe_allow_html=True)
-
-        # 快捷问题按钮
-        st.markdown("<div style='margin-bottom:8px'>", unsafe_allow_html=True)
-        quick_qs = [
-            f"为什么 {cn1} 要作为主食材？换成其他食材会怎样？",
-            f"用 {cn1} + {cn2} 设计一道完整菜谱，含烹饪步骤",
-            f"当前 {int(ratios.get(n1,0.5)*100)}% vs {int(ratios.get(n2,0.5)*100)}% 的比例是最优的吗？",
-        ]
-        qcols = st.columns(3)
-        for qi, q in enumerate(quick_qs):
-            if qcols[qi].button(q, key=f"qbtn_{qi}", use_container_width=True):
-                with st.spinner("AI 思考中..."):
-                    resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":q}], context_str)
-                st.session_state.chat_history.append({"role":"user","content":q})
-                st.session_state.chat_history.append({"role":"assistant","content":resp})
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # 输入框
-        user_input = st.text_input(
-            "向风味顾问提问...",
-            placeholder=f"例如：我想了解 {cn1} 和 {cn2} 的最佳烹饪方式...",
-            key="gemini_input", label_visibility="collapsed")
-        col_send, col_clear = st.columns([4,1])
-        with col_send:
-            if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
-                if user_input.strip():
-                    with st.spinner("AI 思考中..."):
-                        resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
-                    st.session_state.chat_history.append({"role":"user","content":user_input})
-                    st.session_state.chat_history.append({"role":"assistant","content":resp})
-                    st.rerun()
-        with col_clear:
-            if st.button("清空对话", key="clear_btn", use_container_width=True):
-                st.session_state.chat_history = []
-                st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    # ========== AI 对话区 ==========
+    api_key = get_api_key()
+    render_chat_section(api_key, cn1, cn2, selected, ratios, build_context)
 
     # 底部统计
     st.markdown(f"""
