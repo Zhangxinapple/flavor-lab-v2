@@ -4,24 +4,37 @@ import plotly.graph_objects as go
 import google.generativeai as genai
 import json, os, random, math, re
 
-# --- 核心安全配置 ---
-def get_final_key():
+# ================================================================
+# 0. API Key 配置（支持三种方式，优先级从高到低）
+# ================================================================
+def get_api_key():
+    """获取 Gemini API Key，优先级：1.用户输入 2.Secrets 3.config.py"""
+    # 方式1：用户手动输入（通过 session_state 持久化）
+    if "user_gemini_key" in st.session_state and st.session_state.user_gemini_key.strip():
+        return st.session_state.user_gemini_key.strip()
+    
+    # 方式2：Streamlit Secrets（云端部署推荐）
     if "GEMINI_API_KEY" in st.secrets:
-        return st.secrets["GEMINI_API_KEY"]
+        key = st.secrets["GEMINI_API_KEY"]
+        if key and "YOUR_API_KEY" not in key and "AIza" in key:
+            return key
+    
+    # 方式3：config.py 本地配置
     try:
         import config as _cfg
-        return getattr(_cfg, "GEMINI_API_KEY", "")
+        key = getattr(_cfg, "GEMINI_API_KEY", "")
+        if key and "YOUR_API_KEY" not in key and "AIza" in key:
+            return key
     except:
-        return ""
+        pass
+    
+    return ""
 
-active_key = get_final_key()
+# 全局配置
 _GEMINI_MODEL = "gemini-2.0-flash"
 
-# 系统级点火：如果 key 存在，立即配置 SDK
-if active_key and "AIza" in active_key:
-    genai.configure(api_key=active_key)
 # ================================================================
-# 0. 页面配置
+# 1. 页面配置
 # ================================================================
 st.set_page_config(
     page_title="味觉虫洞 Flavor Lab",
@@ -31,12 +44,10 @@ st.set_page_config(
 )
 
 # ================================================================
-# 1. 全局样式 — 深色/浅色双主题自适应
-#    使用 CSS 变量 + prefers-color-scheme，彻底解决夜间模式字体消失
+# 2. 全局样式
 # ================================================================
 st.markdown("""
 <style>
-/* ── CSS 变量：浅色主题默认值 ── */
 :root {
   --bg-main:       #F4F6FA;
   --bg-sidebar:    #FAFBFC;
@@ -49,8 +60,6 @@ st.markdown("""
   --text-faint:    #9CA3AF;
   --shadow:        0 2px 12px rgba(0,0,0,0.07);
 }
-
-/* ── 深色主题覆盖 ── */
 @media (prefers-color-scheme: dark) {
   :root {
     --bg-main:       #0F1117;
@@ -65,29 +74,11 @@ st.markdown("""
     --shadow:        0 2px 12px rgba(0,0,0,0.3);
   }
 }
-
-/* Streamlit 深色模式也触发 */
-[data-theme="dark"] {
-  --bg-main:       #0F1117;
-  --bg-sidebar:    #1A1D27;
-  --bg-card:       #1E2130;
-  --bg-card-hover: #252840;
-  --border-color:  #2D3148;
-  --text-primary:  #F0F2F8;
-  --text-second:   #C5CBD8;
-  --text-muted:    #8B93A8;
-  --text-faint:    #5A6178;
-  --shadow:        0 2px 12px rgba(0,0,0,0.3);
-}
-
-/* ── 基础布局 ── */
 .stApp { background: var(--bg-main) !important; }
 [data-testid="stSidebar"] {
   background: var(--bg-sidebar) !important;
   border-right: 1px solid var(--border-color) !important;
 }
-
-/* ── Hero 顶栏（固定深色渐变，无论主题） ── */
 .hero-header {
   background: linear-gradient(135deg,#0A0A1A 0%,#1A1A3E 50%,#0D2137 100%);
   padding: 24px 32px;
@@ -114,8 +105,6 @@ st.markdown("""
   letter-spacing: .08em;
   text-transform: uppercase;
 }
-
-/* ── 白色卡片（主题自适应） ── */
 .card {
   background: var(--bg-card);
   padding: 20px;
@@ -126,8 +115,6 @@ st.markdown("""
 }
 .card h4, .card b, .card strong { color: var(--text-primary) !important; }
 .card p, .card span, .card div  { color: var(--text-second)  !important; }
-
-/* ── 深色评分卡（固定深色） ── */
 .card-dark {
   background: linear-gradient(135deg,#0A0A1A,#1A1A3E);
   padding: 22px;
@@ -138,8 +125,6 @@ st.markdown("""
   text-align: center;
 }
 .card-dark, .card-dark * { color: #FFFFFF !important; }
-
-/* ── 欢迎卡片 ── */
 .welcome-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
@@ -148,8 +133,6 @@ st.markdown("""
   margin-bottom: 20px;
   box-shadow: var(--shadow);
 }
-.welcome-card h2 { color: var(--text-primary) !important; }
-.welcome-card p, .welcome-card li { color: var(--text-second) !important; }
 .step-card {
   background: var(--bg-card-hover);
   border: 1px solid var(--border-color);
@@ -158,18 +141,7 @@ st.markdown("""
   flex: 1;
   min-width: 200px;
 }
-.step-card h4 { color: var(--text-primary) !important; margin:6px 0 4px; }
-.step-card p  { color: var(--text-muted)   !important; font-size:.85rem; margin:0; }
-
-/* ── 评分数字 ── */
-.score-big {
-  font-size: 4.5rem;
-  font-weight: 900;
-  line-height: 1;
-  display: block;
-}
-
-/* ── 风味标签 ── */
+.score-big { font-size: 4.5rem; font-weight: 900; line-height: 1; display: block; }
 .tag {
   display: inline-block;
   padding: 3px 10px;
@@ -184,72 +156,16 @@ st.markdown("""
 .tag-purple { background:#F5F3FF; color:#7C3AED !important; border:1px solid #DDD6FE; }
 .tag-pink   { background:#FDF2F8; color:#BE185D !important; border:1px solid #FBCFE8; }
 .tag-shared { background:linear-gradient(90deg,#E0F7FA,#EDE7F6); color:#5B21B6 !important; border:1px solid #C4B5FD; font-weight:700; }
-
-/* ── 徽章 ── */
 .badge { display:inline-block; padding:4px 14px; border-radius:20px; font-size:.82rem; font-weight:700; }
 .badge-resonance { background:#D1FAE5; color:#065F46 !important; }
 .badge-contrast  { background:#FEE2E2; color:#991B1B !important; }
 .badge-neutral   { background:var(--bg-card-hover); color:var(--text-second) !important; border:1px solid var(--border-color); }
-
-/* ── 诊断区块 ── */
 .diag { border-radius:12px; padding:14px 16px; margin:8px 0; border-left:4px solid; }
 .diag-res  { background:#F0FDF4; border-color:#22C55E; }
 .diag-ctr  { background:#FFF7ED; border-color:#F97316; }
 .diag-info { background:#EEF6FF; border-color:#3B82F6; }
-.diag b, .diag strong { color:var(--text-primary) !important; }
-.diag span { color:var(--text-second) !important; }
-
-/* ── Tooltip（工艺术语悬停说明） ── */
-.technique-wrap {
-  position: relative;
-  display: inline-block;
-  cursor: help;
-}
-.technique-term {
-  color: #7B2FF7 !important;
-  font-weight: 700;
-  border-bottom: 2px dotted #7B2FF7;
-  text-decoration: none;
-}
-.technique-tooltip {
-  visibility: hidden;
-  opacity: 0;
-  background: #1A1A3E;
-  color: #F0F2F8 !important;
-  text-align: left;
-  border-radius: 10px;
-  padding: 12px 14px;
-  position: absolute;
-  z-index: 9999;
-  bottom: 130%;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 260px;
-  font-size: .8rem;
-  line-height: 1.5;
-  box-shadow: 0 8px 24px rgba(0,0,0,.35);
-  border: 1px solid rgba(255,255,255,.12);
-  transition: opacity .2s, visibility .2s;
-  pointer-events: none;
-}
-.technique-tooltip::after {
-  content: "";
-  position: absolute;
-  top: 100%; left: 50%;
-  transform: translateX(-50%);
-  border: 6px solid transparent;
-  border-top-color: #1A1A3E;
-}
-.technique-wrap:hover .technique-tooltip {
-  visibility: visible;
-  opacity: 1;
-}
-
-/* ── 进度条 ── */
 .pbar-bg   { background:var(--border-color); border-radius:6px; height:7px; overflow:hidden; margin:3px 0; }
 .pbar-fill { height:100%; border-radius:6px; }
-
-/* ── 食材行 ── */
 .ing-row {
   background: var(--bg-card-hover);
   border: 1px solid var(--border-color);
@@ -257,10 +173,6 @@ st.markdown("""
   padding: 10px 14px;
   margin: 5px 0;
 }
-.ing-row * { color: var(--text-primary) !important; }
-.ing-row .muted { color: var(--text-muted) !important; }
-
-/* ── Gemini 对话区 ── */
 .chat-bubble-user {
   background: linear-gradient(135deg,#7B2FF7,#00D2FF);
   color: #fff !important;
@@ -286,22 +198,6 @@ st.markdown("""
 }
 .chat-clearfix { clear:both; }
 .chat-wrap { max-height:420px; overflow-y:auto; padding:8px 0; }
-
-
-/* ── 诊断区块深色模式覆盖 ── */
-@media (prefers-color-scheme: dark) {
-  .diag-res  { background:#0D2818; border-color:#22C55E; }
-  .diag-ctr  { background:#2D1800; border-color:#F97316; }
-  .diag-info { background:#0D1D3A; border-color:#3B82F6; }
-  .welcome-card { background:var(--bg-card) !important; }
-  .step-card { background:var(--bg-card-hover) !important; }
-}
-[data-theme="dark"] .diag-res  { background:#0D2818; border-color:#22C55E; }
-[data-theme="dark"] .diag-ctr  { background:#2D1800; border-color:#F97316; }
-[data-theme="dark"] .diag-info { background:#0D1D3A; border-color:#3B82F6; }
-[data-theme="dark"] .welcome-card { background:var(--bg-card) !important; }
-
-/* ── section 标题 ── */
 .sec-label {
   font-size: .72rem;
   font-weight: 700;
@@ -310,8 +206,6 @@ st.markdown("""
   color: var(--text-faint) !important;
   margin: 14px 0 6px;
 }
-
-/* ── 隐藏 streamlit 默认元素 ── */
 #MainMenu, footer { visibility: hidden; }
 .block-container { padding-top: 1.2rem !important; }
 </style>
@@ -319,7 +213,7 @@ st.markdown("""
 
 
 # ================================================================
-# 2. 本地化引擎
+# 3. 本地化引擎
 # ================================================================
 @st.cache_resource
 def load_localization():
@@ -331,16 +225,13 @@ def load_localization():
 LOC = load_localization()
 
 def t_ingredient(name):
-    m = LOC.get("ingredients", {})
-    return m.get(name) or m.get(name.strip()) or name
+    return LOC.get("ingredients", {}).get(name, name)
 
 def t_category(cat):
     return LOC.get("categories", {}).get(cat, cat)
 
 def t_note(note):
-    m = LOC.get("flavor_notes", {})
-    n = note.strip().lower()
-    return m.get(n) or m.get(note.strip()) or note.strip()
+    return LOC.get("flavor_notes", {}).get(note.strip().lower(), note.strip())
 
 def t_notes_list(mol_input, top_n=999):
     if isinstance(mol_input, set):
@@ -360,7 +251,7 @@ def display_name(name):
 
 
 # ================================================================
-# 3. 数据加载（同时解析 flavor_profiles 和 flavors 两列）
+# 4. 数据加载
 # ================================================================
 def _parse_fp(s):
     if not s or str(s).strip() in ("", "nan"): return set()
@@ -383,7 +274,7 @@ def load_data():
 
 
 # ================================================================
-# 4. 算法引擎
+# 5. 算法引擎
 # ================================================================
 POLARITY = {
     "fat":"L","fatty":"L","oil":"L","oily":"L","waxy":"L","buttery":"L",
@@ -405,7 +296,7 @@ def calc_sim(a, b):
             "only_a": sorted(a - b), "only_b": sorted(b - a), "type": typ}
 
 def polarity_analysis(mol_set):
-    lipo  = sum(1 for m in mol_set if POLARITY.get(m) == "L")
+    lipo = sum(1 for m in mol_set if POLARITY.get(m) == "L")
     hydro = sum(1 for m in mol_set if POLARITY.get(m) == "H")
     total = lipo + hydro
     if total == 0: return {"type": "balanced", "lipo": 0, "hydro": 0, "total": 0}
@@ -413,19 +304,17 @@ def polarity_analysis(mol_set):
     return {"type": t, "lipo": lipo, "hydro": hydro, "total": total}
 
 def find_bridges(df, set_a, set_b, selected, top_n=4):
-    """计算桥接分，归一化到 0-100 范围内"""
     results = []
     for _, row in df.iterrows():
         if row["name"] in selected: continue
         s = row["mol_set"]
         sa = len(s & set_a) / max(len(set_a), 1)
         sb = len(s & set_b) / max(len(set_b), 1)
-        raw_score = sqrt(sa * sb) * (1 + min(sa, sb))
+        raw_score = math.sqrt(sa * sb) * (1 + min(sa, sb))
         if raw_score > 0.04:
             results.append((row["name"], raw_score, sa, sb))
     results.sort(key=lambda x: -x[1])
     top = results[:top_n]
-    # 归一化：最高分映射为 100，其他按比例
     if not top: return []
     max_score = top[0][1]
     return [(name, score/max_score, sa, sb) for name, score, sa, sb in top]
@@ -450,80 +339,65 @@ def radar_vals(mol_set):
 
 
 # ================================================================
-# 5. 工艺术语 Tooltip 数据库
+# 6. Gemini API 调用（使用 SDK 方式，更稳定）
 # ================================================================
-TECHNIQUES = {
-    "低温慢煮": {
-        "en": "Sous Vide",
-        "desc": "将食材密封后放入恒温水浴（通常 55-85°C）长时间烹饪。优点：精确控温，最大程度锁住水分和芳香分子，避免高温氧化破坏挥发性香气。",
-    },
-    "乳化": {
-        "en": "Emulsification",
-        "desc": "将两种不相溶的液体（如油和水）通过乳化剂（蛋黄、芥末等）稳定结合。可将脂溶性和水溶性风味分子同时呈现，是酱汁的核心技术。",
-    },
-    "真空萃取": {
-        "en": "Vacuum Extraction",
-        "desc": "利用负压降低液体沸点，在低温下完成萃取。保留热敏感香气，萃取效率比常压高 3-5 倍，常用于高端风味提取。",
-    },
-    "发酵": {
-        "en": "Fermentation",
-        "desc": "微生物（酵母、细菌）分解糖类产生醇类、酸类和酯类，创造全新的复合风味。发酵是最古老也最复杂的风味转化手段之一。",
-    },
-    "烟熏": {
-        "en": "Smoking",
-        "desc": "木材不完全燃烧产生的烟雾（含酚类、木质素降解物）渗入食材表面，形成独特的焦木香气，同时具有防腐作用。",
-    },
-    "冷冻干燥": {
-        "en": "Freeze Drying / Lyophilization",
-        "desc": "在超低温（-40°C以下）下将水分直接从固态升华为气态，无需经过液态。能保留 95% 以上的芳香分子和营养成分，是最温和的干燥方式。",
-    },
-    "Reduction": {
-        "en": "Reduction / 浓缩收汁",
-        "desc": "通过持续加热蒸发水分，将液体浓缩，使风味分子浓度大幅提升。常用于酱汁和高汤，可将基础风味放大 3-10 倍。",
-    },
-    "Gel": {
-        "en": "Gelification / 凝胶化",
-        "desc": "使用明胶、琼脂或结冷胶等将液体凝固成半固态，使风味在口腔中缓慢释放，延长味觉持续时间，也用于创造质地对比。",
-    },
-    "Espuma": {
-        "en": "Espuma / 泡沫技术",
-        "desc": "西班牙分子料理技术，使用奶油枪将液体充入氮气形成轻盈泡沫。泡沫能将复杂风味以轻盈的质地呈现，增强嗅觉感知。",
-    },
-    "Confit": {
-        "en": "Confit / 油封",
-        "desc": "将食材浸没在油脂中以低温（70-90°C）长时间加热。脂溶性芳香分子充分融入油脂，使食材极度嫩滑且风味浓郁，是法式经典技术。",
-    },
-    "Consommé": {
-        "en": "Consommé / 澄清汤",
-        "desc": "使用蛋白质澄清技术去除肉汤中的杂质，得到透明清澈的浓缩高汤。只保留水溶性风味分子，代表风味的极致纯粹。",
-    },
-    "乳化酱汁": {
-        "en": "Emulsion Sauce",
-        "desc": "通过乳化作用将油脂分散在水相中（如蛋黄酱）或水分散在油相中（如黄油酱汁 Beurre Blanc）。同时呈现脂溶和水溶风味的双重层次。",
-    },
-    "甘纳许": {
-        "en": "Ganache",
-        "desc": "巧克力与奶油的乳化物，比例通常为 2:1 到 1:1。通过乳化使脂溶性可可芳香与水溶性奶香完美融合，是巧克力工艺的核心配方。",
-    },
-}
-
-def make_tooltip(term: str) -> str:
-    """生成带 tooltip 的术语 HTML"""
-    info = TECHNIQUES.get(term)
-    if not info:
-        return f"<b>{term}</b>"
-    en = info["en"]
-    desc = info["desc"]
-    return f"""<span class="technique-wrap">
-      <span class="technique-term">{term}</span>
-      <span class="technique-tooltip">
-        <b style="color:#00D2FF">{term} · {en}</b><br><br>{desc}
-      </span>
-    </span>"""
+def call_gemini(api_key: str, messages: list, context: str) -> str:
+    """调用 Gemini API，返回 AI 回复文本"""
+    if not api_key or "YOUR_API_KEY" in api_key or "AIza" not in api_key:
+        return "❌ <b>API Key 未配置或无效</b>。请在左侧栏输入有效的 Gemini API Key。"
+    
+    try:
+        # 配置 API Key
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(_GEMINI_MODEL)
+        
+        # 构建系统提示
+        system_prompt = (
+            "你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
+            "【当前搭配数据】\n" + context + "\n\n"
+            "【你的任务】\n"
+            "1. 基于上方分子数据帮助用户深入理解食材搭配的科学原理\n"
+            "2. 当用户描述数据库里没有的食材时，用知识库估计其风味分子特征来作答\n"
+            "3. 主动引导用户思考：主食材选择理由、比例调整效果、实际烹饪落地方案\n"
+            "4. 可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例\n"
+            "5. 遇到数据库没有的食材，明确告知并基于知识库分析\n\n"
+            "【回答风格】\n"
+            "- 专业但亲切的中文，像有深度的厨师朋友在交流\n"
+            "- 多用比喻和具体例子\n"
+            "- 每次回答结尾提出一个延伸问题引导用户继续探索"
+        )
+        
+        # 构建对话内容
+        chat = model.start_chat(history=[])
+        
+        # 先发送系统提示
+        chat.send_message(system_prompt)
+        
+        # 然后发送历史消息
+        for msg in messages:
+            if msg["role"] == "user":
+                response = chat.send_message(msg["content"])
+        
+        return response.text
+        
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str:
+            return "⚠️ <b>请求频率超限（429）</b><br>请稍等 30 秒后再试，或检查 API 配额。"
+        elif "API_KEY_INVALID" in err_str or "401" in err_str:
+            return "❌ <b>API Key 无效</b>。请确认 Key 正确且 Gemini API 已启用。"
+        elif "403" in err_str:
+            return "❌ <b>API Key 无权限</b>。请确认已启用 Gemini API。"
+        elif "500" in err_str or "503" in err_str:
+            return "⚠️ <b>Gemini 服务暂时不可用</b>，请稍后重试。"
+        elif "timeout" in err_str.lower():
+            return "⚠️ <b>请求超时</b>，请稍后重试。"
+        else:
+            return f"⚠️ 调用出错: {err_str[:200]}"
 
 
 # ================================================================
-# 6. HTML 辅助
+# 7. HTML 辅助函数
 # ================================================================
 TAG_CLASSES = ["tag-blue","tag-green","tag-orange","tag-purple","tag-pink"]
 
@@ -536,48 +410,8 @@ def tags_html(notes, cls="tag-blue", max_n=8):
 def shared_tags_html(notes, max_n=10):
     return " ".join(f'<span class="tag tag-shared">⚡ {t_note(n)}</span>' for n in notes[:max_n])
 
-def tech_tip(term):
-    """便捷函数：返回带 tooltip 的术语"""
-    return make_tooltip(term)
-
 
 # ================================================================
-# ================================================================
-# 7. Gemini API 优化对话引擎 (V3.0 取长补短版)
-# ================================================================
-def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """系统化 SDK 调用版 - 兼容 V2 架构"""
-    if not api_key or "YOUR_API_KEY" in api_key:
-        return "❌ <b>API Key 未配置</b>。请在侧边栏输入或在 Secrets 中设置。"
-
-    try:
-        # 核心：使用官方 SDK 的 GenerativeModel
-        model = genai.GenerativeModel(_GEMINI_MODEL)
-        
-        # 注入你的米其林三星主厨人设
-        system_prompt = (
-            f"你是「风味虫洞」专属 AI 顾问。拥有分子烹饪、风味化学背景。\n"
-            f"【实验数据背景】: {context}\n"
-            f"请基于数据提供专业分析，风格亲切，使用中文。结尾提一个延伸问题。"
-        )
-
-        # 构造对话历史
-        history_formatted = []
-        for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            history_formatted.append({"role": role, "parts": [msg["content"]]})
-
-        # 请求生成
-        response = model.generate_content([system_prompt] + history_formatted)
-        return response.text
-
-    except Exception as e:
-        err_str = str(e)
-        if "429" in err_str: return "⚠️ 频率受限，请稍等一分钟。"
-        if "API_KEY_INVALID" in err_str: return "❌ API Key 无效，请检查配置。"
-        return f"⚠️ 助手暂时离线: {err_str}"
-
-
 # 8. 欢迎页
 # ================================================================
 def render_welcome():
@@ -585,49 +419,36 @@ def render_welcome():
     <div class="welcome-card">
       <div style="text-align:center;margin-bottom:28px">
         <div style="font-size:3.5rem;margin-bottom:8px">🧬</div>
-        <h2 style="margin:0;font-size:1.7rem">味觉虫洞 · Flavor Lab</h2>
+        <h2 style="margin:0;font-size:1.7rem;color:var(--text-primary)">味觉虫洞 · Flavor Lab</h2>
         <p style="margin:8px 0 0;font-size:1rem;color:var(--text-muted)">
           基于 FlavorDB 分子数据库的专业食材搭配引擎
         </p>
       </div>
-
-      <p style="font-size:.95rem;line-height:1.8;margin-bottom:24px">
+      <p style="font-size:.95rem;line-height:1.8;margin-bottom:24px;color:var(--text-second)">
         <b>味觉虫洞</b>通过分析食材中的挥发性芳香分子，科学揭示哪些食材在分子层面"天生一对"，
         帮助厨师、食品研发者和美食爱好者发现意想不到的绝妙搭配。
-        数据库涵盖 <b>551 种食材</b>、<b>464 个风味维度</b>。
       </p>
-
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px">
         <div class="step-card">
           <div style="font-size:1.6rem">①</div>
-          <h4>选择食材</h4>
-          <p>在左侧栏选择 2-4 种想要研究的食材，可按分类筛选或直接搜索</p>
+          <h4 style="color:var(--text-primary)">选择食材</h4>
+          <p style="color:var(--text-muted);font-size:.85rem">在左侧栏选择 2-4 种想要研究的食材</p>
         </div>
         <div class="step-card">
           <div style="font-size:1.6rem">②</div>
-          <h4>调整比例</h4>
-          <p>通过滑块设定各食材在配方中的比例，雷达图实时反映比例变化</p>
+          <h4 style="color:var(--text-primary)">调整比例</h4>
+          <p style="color:var(--text-muted);font-size:.85rem">通过滑块设定各食材在配方中的比例</p>
         </div>
         <div class="step-card">
           <div style="font-size:1.6rem">③</div>
-          <h4>查看分析</h4>
-          <p>获得分子共鸣指数、风味指纹、介质推演和主厨工艺建议</p>
+          <h4 style="color:var(--text-primary)">查看分析</h4>
+          <p style="color:var(--text-muted);font-size:.85rem">获得分子共鸣指数、风味指纹、工艺建议</p>
         </div>
         <div class="step-card">
           <div style="font-size:1.6rem">④</div>
-          <h4>AI 深度对话</h4>
-          <p>输入 Gemini API Key，与 AI 顾问就当前搭配进行专业深度探讨</p>
+          <h4 style="color:var(--text-primary)">AI 深度对话</h4>
+          <p style="color:var(--text-muted);font-size:.85rem">输入 Gemini API Key，与 AI 顾问深度探讨</p>
         </div>
-      </div>
-
-      <div style="background:var(--bg-card-hover);border-radius:12px;padding:16px 20px;border:1px solid var(--border-color)">
-        <b style="color:#7B2FF7">💡 使用提示</b>
-        <ul style="margin:8px 0 0;padding-left:20px;font-size:.88rem;line-height:1.9">
-          <li>工艺术语（如<b>低温慢煮</b>）上方悬停鼠标可查看详细解说</li>
-          <li>风味桥接推荐：系统自动寻找能串联两种食材的"第三食材"</li>
-          <li>分子连线网络图直观展示食材通过哪些香气节点相连</li>
-          <li>分类筛选支持多选，Vegan 模式自动过滤动物性食材</li>
-        </ul>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -642,25 +463,25 @@ def main():
         st.error("❌ 找不到 flavordb_data.csv，请放到与 app.py 相同目录。")
         st.stop()
 
-    # ── Hero ──
+    # Hero 顶栏
     st.markdown("""
     <div class="hero-header">
       <span style="font-size:2.2rem">🧬</span>
       <div>
         <p class="hero-title">味觉虫洞 · Flavor Lab</p>
-        <p class="hero-sub">Professional Flavor Pairing Engine &nbsp;·&nbsp; V2.0</p>
+        <p class="hero-sub">Professional Flavor Pairing Engine · V2.0</p>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 侧边栏 ──
+    # ========== 侧边栏 ==========
     with st.sidebar:
         st.markdown("### 🔬 实验参数")
 
         # 分类筛选
         all_cats = sorted(df["category"].unique().tolist())
         cat_display = {f"{t_category(c)}（{c}）": c for c in all_cats}
-        st.markdown('<div class="sec-label">🗂 按分类筛选（不选 = 全部）</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-label">🗂 按分类筛选</div>', unsafe_allow_html=True)
         selected_cat_labels = st.multiselect(
             label="分类", options=list(cat_display.keys()),
             default=[], label_visibility="collapsed", key="cat_filter")
@@ -699,32 +520,51 @@ def main():
 
         st.divider()
 
-        # ── AI 顾问：config.py 后台 Key + 侧边栏可覆盖 ──
-       with st.sidebar:
-        st.title("🧬 配置中心")
-        # 这里是关键：将 user_key 的输入直接联动到 active_key
-        user_key = st.text_input("Gemini API Key", type="password", value=active_key, help="如果云端 Secrets 未配置，请在此手动输入")
+        # ========== AI 顾问配置（修复版）==========
+        st.markdown("### 🤖 AI 风味顾问")
         
-        # 如果用户手动输入了 key，则覆盖系统读取的 key
-        if user_key and user_key != active_key:
-            active_key = user_key
-            genai.configure(api_key=active_key)
-    
-            st.divider()
-            st.caption("数据来源：FlavorDB · 551 种食材 · 464 个风味维度")
+        # 获取当前有效的 key
+        current_key = get_api_key()
+        
+        # 用户输入框（使用 session_state 持久化）
+        user_input_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            value=st.session_state.get("user_gemini_key", ""),
+            placeholder="在此输入 API Key 或配置 Secrets",
+            help="支持三种配置方式：1.此处输入 2.Secrets 3.config.py",
+            key="gemini_key_input"
+        )
+        
+        # 保存用户输入到 session_state
+        if user_input_key.strip():
+            st.session_state.user_gemini_key = user_input_key.strip()
+        
+        # 显示当前状态
+        effective_key = get_api_key()
+        if effective_key:
+            source = "（用户输入）" if st.session_state.get("user_gemini_key") else ("（Secrets）" if "GEMINI_API_KEY" in st.secrets else "（config.py）")
+            st.success(f"✅ AI 顾问就绪 {source}", icon="🔑")
+        else:
+            st.warning("⚠️ 未配置 API Key")
+            st.caption("[→ 免费获取 Gemini Key](https://aistudio.google.com/app/apikey)")
 
-    # ── 未选择食材：显示欢迎页 ──
+        st.divider()
+        st.caption("数据来源：FlavorDB · 分子风味科学")
+
+    # ========== 未选择足够食材：显示欢迎页 ==========
     if len(selected) < 2:
         render_welcome()
         return
 
+    # ========== 数据分析 ==========
     rows = {n: df[df["name"] == n].iloc[0] for n in selected}
     mol_sets = {n: rows[n]["mol_set"] for n in selected}
     n1, n2 = selected[0], selected[1]
     sim = calc_sim(mol_sets[n1], mol_sets[n2])
     cn1, cn2 = t_ingredient(n1), t_ingredient(n2)
 
-    # 为 Gemini 构建上下文
+    # 构建 Gemini 上下文
     def build_context():
         lines = [f"正在分析食材搭配：{' + '.join(t_ingredient(n) for n in selected)}"]
         lines.append(f"分子共鸣指数：{sim['score']}%（类型：{'同源共振' if sim['type']=='resonance' else '对比碰撞' if sim['type']=='contrast' else '平衡搭档'}）")
@@ -738,13 +578,14 @@ def main():
             lines.append(f"共享节点：{', '.join(shared_cn)}")
         return "\n".join(lines)
 
+    # ========== 主内容区 ==========
     col_left, col_right = st.columns([1.35, 1], gap="large")
 
     # ===== 左栏 =====
     with col_left:
         # 雷达图
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(f"<h4>🔭 风味维度雷达图</h4>", unsafe_allow_html=True)
+        st.markdown("<h4>🔭 风味维度雷达图</h4>", unsafe_allow_html=True)
         palette = [("#00D2FF","rgba(0,210,255,0.15)"),("#7B2FF7","rgba(123,47,247,0.15)"),
                    ("#FF6B6B","rgba(255,107,107,0.15)"),("#00E676","rgba(0,230,118,0.15)")]
         fig_radar = go.Figure()
@@ -894,54 +735,21 @@ def main():
             if pol["type"] == "lipophilic":
                 st.markdown(f"""<div class="diag diag-ctr">
                   <b>🫙 脂溶性主导</b> <span style="color:var(--text-muted)">（脂溶 {lp}% / 水溶 {hp}%）</span><br>
-                  <span>推荐：{tech_tip('Confit')}、{tech_tip('甘纳许')}、慕斯基底、{tech_tip('乳化')}酱汁</span>
+                  <span>推荐：油封(Confit)、甘纳许、慕斯基底、乳化酱汁</span>
                 </div>""", unsafe_allow_html=True)
             elif pol["type"] == "hydrophilic":
                 st.markdown(f"""<div class="diag diag-info">
                   <b>🫗 水溶性主导</b> <span style="color:var(--text-muted)">（水溶 {hp}% / 脂溶 {lp}%）</span><br>
-                  <span>推荐：{tech_tip('Consommé')}、澄清冻、冰沙、{tech_tip('真空萃取')}</span>
+                  <span>推荐：澄清汤(Consommé)、澄清冻、冰沙、真空萃取</span>
                 </div>""", unsafe_allow_html=True)
             else:
                 st.markdown(f"""<div class="diag diag-res">
                   <b>⚖️ 双亲性平衡</b> <span style="color:var(--text-muted)">（脂溶 {lp}% / 水溶 {hp}%）</span><br>
-                  <span>推荐：{tech_tip('乳化酱汁')}、{tech_tip('Espuma')}、{tech_tip('真空萃取')}</span>
+                  <span>推荐：乳化酱汁、泡沫(Espuma)、真空萃取</span>
                 </div>""", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # 主厨建议（含 tooltip）
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("<h4>👨‍🍳 主厨工艺建议</h4>", unsafe_allow_html=True)
-        tips_pool = {
-            "resonance": [
-                f"以 <b>{cn1}</b> 为基底，将 <b>{cn2}</b> 浓缩（{tech_tip('Reduction')}）后叠加，在同一芳香维度形成「风味放大」效果。",
-                f"两者共享的芳香分子建议通过 {tech_tip('低温慢煮')} 保留，避免高温氧化破坏共鸣节点。",
-                f"考虑将 <b>{cn2}</b> 制成 {tech_tip('Gel')}，穿插在 <b>{cn1}</b> 的质地层间，延长风味余韵。",
-            ],
-            "contrast": [
-                f"利用 <b>{cn2}</b> 的对比维度「切割」{cn1} 的厚重感，建议以提味剂形式在收尾阶段引入，而非作为前调。",
-                f"对比型搭配分阶段引入：先以 <b>{cn1}</b> 建立底味，后期通过 {tech_tip('低温慢煮')} 的 <b>{cn2}</b> 制造味觉转折。",
-                f"将 <b>{cn2}</b> 做成 {tech_tip('Espuma')}，轻盈地覆盖 <b>{cn1}</b> 的厚重质地，创造对比张力。",
-            ],
-            "neutral": [
-                f"比例递进策略：从 <b>{cn1}</b> 的纯净基调出发，逐步引入 <b>{cn2}</b> 的差异维度，通过 {tech_tip('乳化')} 融合。",
-                f"{tech_tip('真空萃取')} 让两者在分子层面充分融合，实现比例可控的风味协同。",
-                f"将 <b>{cn1}</b> 作为主味质地，<b>{cn2}</b> 通过 {tech_tip('冷冻干燥')} 制成粉末，提供风味跳跃感。",
-            ],
-        }
-        tip = random.choice(tips_pool[sim["type"]])
-        procs = ["低温慢煮（Sous Vide）","乳化（Emulsification）","真空萃取","发酵","烟熏","冷冻干燥"]
-        proc_key = random.choice(list(TECHNIQUES.keys()))
-        proc_html = tech_tip(proc_key)
-
-        st.markdown(f"""
-        <div class="diag diag-info" style="margin-bottom:10px">
-          💡 {tip}
-        </div>
-        <p style="color:var(--text-second)">🔧 <b>推荐工艺：</b>{proc_html}</p>
-        """, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # ── 第二行 ──
+    # ========== 第二行 ==========
     st.markdown("---")
     cb, cc = st.columns([1,1], gap="large")
 
@@ -955,15 +763,14 @@ def main():
                 bcn = t_ingredient(bname)
                 bcat_en = df[df["name"]==bname].iloc[0]["category"] if len(df[df["name"]==bname])>0 else ""
                 bcat_zh = t_category(bcat_en)
-                # bsc 已归一化到 0-1，×100 得到 0-100 的连接力
                 ps = min(100, int(bsc*100)); pa = min(100, int(sa*100)); pb = min(100, int(sb*100))
                 st.markdown(f"""
                 <div class="ing-row">
                   <div style="font-weight:700;color:var(--text-primary)">{bcn}
-                    <span class="muted" style="font-size:.75rem;font-weight:400"> {bname}</span>
+                    <span style="color:var(--text-muted);font-size:.75rem;font-weight:400"> {bname}</span>
                   </div>
-                  <div class="muted" style="font-size:.74rem">{bcat_zh} · 连接力 {ps}%</div>
-                  <div class="muted" style="font-size:.74rem">与{cn1} {pa}% | 与{cn2} {pb}%</div>
+                  <div style="color:var(--text-muted);font-size:.74rem">{bcat_zh} · 连接力 {ps}%</div>
+                  <div style="color:var(--text-muted);font-size:.74rem">与{cn1} {pa}% | 与{cn2} {pb}%</div>
                   <div class="pbar-bg" style="margin-top:5px">
                     <div class="pbar-fill" style="width:{ps}%;background:linear-gradient(90deg,#F97316,#FBBF24)"></div>
                   </div>
@@ -1001,19 +808,20 @@ def main():
                 cls = TAG_CLASSES[i % len(TAG_CLASSES)]
                 st.markdown(f"""
                 <div class="ing-row" style="margin-bottom:10px">
-                  <div style="font-weight:700;font-size:.95rem">{cn}</div>
-                  <div class="muted" style="font-size:.76rem;margin:2px 0">{t_category(row['category'])} · {row['mol_count']} 个风味分子</div>
+                  <div style="font-weight:700;font-size:.95rem;color:var(--text-primary)">{cn}</div>
+                  <div style="color:var(--text-muted);font-size:.76rem;margin:2px 0">{t_category(row['category'])} · {row['mol_count']} 个风味分子</div>
                   <div style="margin-top:5px">{tags_html(n5, cls)}</div>
                 </div>""", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Gemini 对话区 ──
+    # ========== Gemini AI 对话区（修复版）==========
     st.markdown("---")
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f'<h4>🧬 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
+    st.markdown(f'<h4>🤖 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
 
-    # 对话区：active_key 从侧边栏 widget 实时读取
-    active_key = st.session_state.get("manual_gemini_key", "").strip() or _active_key
+    # 获取当前有效的 API Key
+    active_key = get_api_key()
+    
     if not active_key:
         st.markdown("""
         <div class="diag diag-info">
@@ -1037,18 +845,11 @@ def main():
         context_str = build_context()
 
         def md_to_html(text: str) -> str:
-            """把 AI 回复的 Markdown 转成 HTML，支持加粗/链接/换行/有序无序列表"""
+            """把 AI 回复的 Markdown 转成 HTML"""
             import re as _re
-            # 链接 [text](url)
-            text = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
-                           r'<a href="\2" target="_blank" style="color:#7B2FF7">\1</a>', text)
-            # 加粗 **text**
+            text = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank" style="color:#7B2FF7">\1</a>', text)
             text = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-            # 无序列表行 "- item" 或 "· item"
             text = _re.sub(r'(?m)^[\-·]\s+(.+)$', r'<div style="padding:2px 0 2px 12px">• \1</div>', text)
-            # 有序列表行 "1. item"
-            text = _re.sub(r'(?m)^\d+\.\s+(.+)$', r'<div style="padding:2px 0 2px 12px">\1</div>', text)
-            # 换行
             text = text.replace("\n", "<br>")
             return text
 
@@ -1064,7 +865,7 @@ def main():
             chat_html += "</div>"
             st.markdown(chat_html, unsafe_allow_html=True)
         else:
-            # 动态生成引导卡，基于当前搭配类型给出针对性引导
+            # 显示引导信息
             type_hints = {
                 "resonance": f"它们共享大量相同的芳香分子，属于「同源共振」型搭配，适合用叠加增强来放大共鸣。",
                 "contrast":  f"它们风味差异显著，属于「对比碰撞」型搭配，高明的厨师会用这种张力创造层次感。",
@@ -1079,7 +880,6 @@ def main():
                 💬 <b>你可以问我：</b><br>
                 · 为什么选 {cn1} 作为主食材，而不是其他？<br>
                 · 如果我手边没有 {cn2}，有什么替代方案？<br>
-                · 这两种食材在数据库里没有收录的搭配方式是什么？<br>
                 · 请帮我设计一道突出这个搭配的完整菜谱
               </span>
             </div>""", unsafe_allow_html=True)
@@ -1089,37 +889,34 @@ def main():
         quick_qs = [
             f"为什么 {cn1} 要作为主食材？换成其他食材会怎样？",
             f"用 {cn1} + {cn2} 设计一道完整菜谱，含烹饪步骤",
-            f"如果数据库里没有我想要的食材，我该怎么描述给你？",
             f"当前 {int(ratios.get(n1,0.5)*100)}% vs {int(ratios.get(n2,0.5)*100)}% 的比例是最优的吗？",
         ]
-        qcols = st.columns(2)
+        qcols = st.columns(3)
         for qi, q in enumerate(quick_qs):
-            if qcols[qi%2].button(q, key=f"qbtn_{qi}", use_container_width=True):
+            if qcols[qi].button(q, key=f"qbtn_{qi}", use_container_width=True):
                 with st.spinner("AI 思考中..."):
-                    if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
-                        if user_input.strip():
-                            with st.spinner("AI 思考中..."):
-                                # 统一使用 active_key
-                                resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
+                    resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":q}], context_str)
+                st.session_state.chat_history.append({"role":"user","content":q})
+                st.session_state.chat_history.append({"role":"assistant","content":resp})
+                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
         # 输入框
         user_input = st.text_input(
             "向风味顾问提问...",
-            placeholder=f"例如：我想用榴莲+{cn2}，数据库没有榴莲但我知道它有硫化物气息，请帮我分析...",
+            placeholder=f"例如：我想了解 {cn1} 和 {cn2} 的最佳烹饪方式...",
             key="gemini_input", label_visibility="collapsed")
         col_send, col_clear = st.columns([4,1])
         with col_send:
             if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
                 if user_input.strip():
                     with st.spinner("AI 思考中..."):
-                      if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
-                        if user_input.strip():
-                            with st.spinner("AI 思考中..."):
-                                # 统一使用 active_key
-                                resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
+                        resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
+                    st.session_state.chat_history.append({"role":"user","content":user_input})
+                    st.session_state.chat_history.append({"role":"assistant","content":resp})
+                    st.rerun()
         with col_clear:
-            if st.button("清空", key="clear_btn", use_container_width=True):
+            if st.button("清空对话", key="clear_btn", use_container_width=True):
                 st.session_state.chat_history = []
                 st.rerun()
 
@@ -1128,8 +925,7 @@ def main():
     # 底部统计
     st.markdown(f"""
     <div style="text-align:center;padding:14px;color:var(--text-faint);font-size:.76rem">
-      🧬 FlavorDB · {len(df)} 种食材 · {len(LOC.get('ingredients',{}))} 个食材已汉化 ·
-      共享分子 {len(sim['shared'])} 个 · Jaccard {int(sim['jaccard']*100)}%
+      🧬 FlavorDB · {len(df)} 种食材 · 共享分子 {len(sim['shared'])} 个 · Jaccard {int(sim['jaccard']*100)}%
     </div>""", unsafe_allow_html=True)
 
 
