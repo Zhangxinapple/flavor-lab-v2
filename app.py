@@ -528,13 +528,10 @@ def tech_tip(term):
 # ================================================================
 # 7. Gemini API 对话
 # ================================================================
-# ── 后台 API Key（不在前端暴露）──
-_GEMINI_KEY = "AIzaSyCw6AU04YSEBjEmUlmE95reOis7B6PPH20"
-
-def call_gemini(messages: list, context: str) -> str:
+def call_gemini(api_key: str, messages: list, context: str) -> str:
     """调用 Gemini API，返回文字回复"""
     import urllib.request, urllib.error
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={_GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     # 构建系统上下文 + 历史消息
     system_prompt = f"""你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。
 
@@ -706,10 +703,17 @@ def main():
 
         st.divider()
 
-        # ── AI 顾问状态标识（Key 已内置，无需用户输入）──
+        # ── Gemini API Key 输入（password 模式，仅存在 session_state 中）──
         st.markdown("### 🤖 AI 风味顾问")
-        st.success("✅ AI 顾问已就绪", icon="🧬")
-        st.caption("选择食材后，在页面底部与 AI 顾问对话")
+        gemini_key = st.text_input(
+            "Gemini API Key", type="password",
+            placeholder="粘贴你的 API Key...",
+            help="Key 仅保存在本次会话内存中，不会传输或存储到任何服务器",
+            key="gemini_key")
+        if gemini_key:
+            st.success("✅ AI 顾问已就绪", icon="🔑")
+        else:
+            st.caption("[免费获取 Gemini API Key →](https://aistudio.google.com/app/apikey)")
 
         st.divider()
         st.caption("数据来源：FlavorDB · 551 种食材 · 464 个风味维度")
@@ -1013,8 +1017,15 @@ def main():
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f'<h4>🧬 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
 
-    # API Key 已内置，直接展示对话区
-    if True:
+    gemini_key = st.session_state.get("gemini_key", "")
+    if not gemini_key:
+        st.markdown(f"""
+        <div class="diag diag-info">
+          <b>🔑 输入 API Key 开启 AI 对话</b><br>
+          <span>在左侧栏粘贴你的 Gemini API Key，即可与风味顾问就 <b>{cn1} × {cn2}</b> 展开深度探讨。<br>
+          <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#7B2FF7">→ 免费获取（Google AI Studio）</a></span>
+        </div>""", unsafe_allow_html=True)
+    else:
         # 初始化对话历史
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
@@ -1073,7 +1084,7 @@ def main():
         for qi, q in enumerate(quick_qs):
             if qcols[qi%2].button(q, key=f"qbtn_{qi}", use_container_width=True):
                 with st.spinner("AI 思考中..."):
-                    resp = call_gemini(st.session_state.chat_history + [{"role":"user","content":q}], context_str)
+                    resp = call_gemini(gemini_key, st.session_state.chat_history + [{"role":"user","content":q}], context_str)
                 st.session_state.chat_history.append({"role":"user","content":q})
                 st.session_state.chat_history.append({"role":"assistant","content":resp})
                 st.rerun()
@@ -1089,7 +1100,7 @@ def main():
             if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
                 if user_input.strip():
                     with st.spinner("AI 思考中..."):
-                        resp = call_gemini(st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
+                        resp = call_gemini(gemini_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
                     st.session_state.chat_history.append({"role":"user","content":user_input})
                     st.session_state.chat_history.append({"role":"assistant","content":resp})
                     st.rerun()
