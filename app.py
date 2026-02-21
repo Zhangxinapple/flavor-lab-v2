@@ -531,7 +531,7 @@ def tech_tip(term):
 def call_gemini(api_key: str, messages: list, context: str) -> str:
     """调用 Gemini API，返回文字回复"""
     import urllib.request, urllib.error
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_AIzaSyA8s8zkg24S1r8Pju2Rev8O-tJGyJV_SuI}"
     # 构建系统上下文 + 历史消息
     system_prompt = f"""你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。
 
