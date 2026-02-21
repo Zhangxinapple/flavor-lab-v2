@@ -546,26 +546,36 @@ def tech_tip(term):
 # 7. Gemini API 优化对话引擎 (V3.0 取长补短版)
 # ================================================================
 def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """系统化 SDK 调用版"""
+    """系统化 SDK 调用版 - 兼容 V2 架构"""
     if not api_key or "YOUR_API_KEY" in api_key:
-        return "❌ <b>API Key 未配置</b>。请在侧边栏输入或配置 Secrets。"
+        return "❌ <b>API Key 未配置</b>。请在侧边栏输入或在 Secrets 中设置。"
 
     try:
-        # 这里的 genai 已经在顶部 configure 过了
+        # 核心：使用官方 SDK 的 GenerativeModel
         model = genai.GenerativeModel(_GEMINI_MODEL)
         
-        system_prompt = f"你是「风味虫洞」专业顾问。数据：{context}\n请专业地回答，用中文，结尾提一个问题。"
+        # 注入你的米其林三星主厨人设
+        system_prompt = (
+            f"你是「风味虫洞」专属 AI 顾问。拥有分子烹饪、风味化学背景。\n"
+            f"【实验数据背景】: {context}\n"
+            f"请基于数据提供专业分析，风格亲切，使用中文。结尾提一个延伸问题。"
+        )
 
-        # 转换格式以匹配 SDK
-        history = []
+        # 构造对话历史
+        history_formatted = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
-            history.append({"role": role, "parts": [msg["content"]]})
+            history_formatted.append({"role": role, "parts": [msg["content"]]})
 
-        response = model.generate_content([system_prompt] + history)
+        # 请求生成
+        response = model.generate_content([system_prompt] + history_formatted)
         return response.text
+
     except Exception as e:
-        return f"⚠️ 助手离线: {str(e)}"
+        err_str = str(e)
+        if "429" in err_str: return "⚠️ 频率受限，请稍等一分钟。"
+        if "API_KEY_INVALID" in err_str: return "❌ API Key 无效，请检查配置。"
+        return f"⚠️ 助手暂时离线: {err_str}"
 
 
 # 8. 欢迎页
@@ -690,23 +700,18 @@ def main():
         st.divider()
 
         # ── AI 顾问：config.py 后台 Key + 侧边栏可覆盖 ──
-        st.markdown("### 🤖 AI 风味顾问")
-        manual_key = st.text_input(
-            "Gemini API Key", type="password",
-            placeholder="留空则使用后台内置 Key",
-            help="粘贴新 Key 可立即覆盖内置配置",
-            key="manual_gemini_key")
-        # 优先用手动输入，否则用后台配置
-        active_key = manual_key.strip() if manual_key.strip() else _active_key
-        if active_key:
-            label = "（自定义）" if manual_key.strip() else "（内置）"
-            st.success(f"✅ AI 顾问就绪 {label}", icon="🔑")
-        else:
-            st.warning("⚠️ 未配置 API Key")
-            st.caption("[获取免费 Gemini Key →](https://aistudio.google.com/app/apikey)")
-
-        st.divider()
-        st.caption("数据来源：FlavorDB · 551 种食材 · 464 个风味维度")
+       with st.sidebar:
+        st.title("🧬 配置中心")
+        # 这里是关键：将 user_key 的输入直接联动到 active_key
+        user_key = st.text_input("Gemini API Key", type="password", value=active_key, help="如果云端 Secrets 未配置，请在此手动输入")
+        
+        # 如果用户手动输入了 key，则覆盖系统读取的 key
+        if user_key and user_key != active_key:
+            active_key = user_key
+            genai.configure(api_key=active_key)
+    
+            st.divider()
+            st.caption("数据来源：FlavorDB · 551 种食材 · 464 个风味维度")
 
     # ── 未选择食材：显示欢迎页 ──
     if len(selected) < 2:
@@ -1091,10 +1096,11 @@ def main():
         for qi, q in enumerate(quick_qs):
             if qcols[qi%2].button(q, key=f"qbtn_{qi}", use_container_width=True):
                 with st.spinner("AI 思考中..."):
-                    resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":q}], context_str)
-                st.session_state.chat_history.append({"role":"user","content":q})
-                st.session_state.chat_history.append({"role":"assistant","content":resp})
-                st.rerun()
+                    if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
+                        if user_input.strip():
+                            with st.spinner("AI 思考中..."):
+                                # 统一使用 active_key
+                                resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
         st.markdown("</div>", unsafe_allow_html=True)
 
         # 输入框
@@ -1107,10 +1113,11 @@ def main():
             if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
                 if user_input.strip():
                     with st.spinner("AI 思考中..."):
-                        resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
-                    st.session_state.chat_history.append({"role":"user","content":user_input})
-                    st.session_state.chat_history.append({"role":"assistant","content":resp})
-                    st.rerun()
+                      if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
+                        if user_input.strip():
+                            with st.spinner("AI 思考中..."):
+                                # 统一使用 active_key
+                                resp = call_gemini(active_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
         with col_clear:
             if st.button("清空", key="clear_btn", use_container_width=True):
                 st.session_state.chat_history = []
