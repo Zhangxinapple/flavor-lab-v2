@@ -528,18 +528,33 @@ def tech_tip(term):
 # ================================================================
 # 7. Gemini API 对话
 # ================================================================
-def call_gemini(api_key: str, messages: list, context: str) -> str:
+# ── 后台 API Key（不在前端暴露）──
+_GEMINI_KEY = "AIzaSyCw6AU04YSEBjEmUlmE95reOis7B6PPH20"
+
+def call_gemini(messages: list, context: str) -> str:
     """调用 Gemini API，返回文字回复"""
     import urllib.request, urllib.error
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={_GEMINI_KEY}"
     # 构建系统上下文 + 历史消息
-    system_prompt = f"""你是一位专业的风味研究顾问和米其林级别厨师顾问，精通食材搭配、分子烹饪和风味化学。
-当前分析上下文：
-{context}
-请基于以上风味分析数据，用专业但通俗的中文回答用户关于食材搭配、烹饪工艺和风味科学的问题。回答要具体、有深度，可以引用风味分子、化学原理或经典食谱案例。"""
+    system_prompt = f"""你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。
 
-    contents = [{"role":"user","parts":[{"text": system_prompt + "\n\n请确认你已了解分析上下文，简短回应后等待我的第一个问题。"}]},
-                {"role":"model","parts":[{"text":"已了解当前风味分析上下文，我是你的专业风味顾问，请随时提问！"}]}]
+【当前搭配数据】
+{context}
+
+【你的任务】
+1. 基于上方的分子数据帮助用户深入理解食材搭配的科学原理
+2. 当用户描述数据库里没有的食材时，用你的知识库估计其风味分子特征来作答
+3. 主动引导用户思考：主食材的选择理由、比例调整的效果、实际烹饪落地方案
+4. 回答要具体有深度，可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例
+5. 如遇到系统数据库没有的食材，明确告知"数据库暂无此食材，以下基于我的知识库分析"
+
+【回答风格】
+- 用专业但亲切的中文，像一位有深度的厨师朋友在交流
+- 避免过于学术，多用比喻和具体例子
+- 每次回答结尾可以提出一个延伸问题引导用户继续探索"""
+
+    contents = [{"role":"user","parts":[{"text": system_prompt + "\n\n请确认你已了解当前搭配数据，用一句话介绍这个搭配的核心特点，然后主动提出2个最值得探索的问题引导我开始对话。"}]},
+                {"role":"model","parts":[{"text":"已了解！我是你的风味虫洞顾问，随时准备就这个搭配的分子奥秘展开深度探讨。"}]}]
     for msg in messages:
         role = "user" if msg["role"] == "user" else "model"
         contents.append({"role": role, "parts": [{"text": msg["content"]}]})
@@ -553,11 +568,20 @@ def call_gemini(api_key: str, messages: list, context: str) -> str:
             return data["candidates"][0]["content"]["parts"][0]["text"]
     except urllib.error.HTTPError as e:
         body = e.read().decode()
-        if "API_KEY_INVALID" in body or "INVALID_ARGUMENT" in body:
-            return "❌ API Key 无效，请检查后重试。"
-        return f"❌ API 错误 ({e.code})：{body[:200]}"
+        if e.code == 429:
+            return "⚠️ **请求过于频繁或当日配额已用完**\n\nGemini 免费版每分钟有请求限制，请稍等 1-2 分钟后再试。如需更高频次使用，可在 [Google AI Studio](https://aistudio.google.com) 升级套餐。"
+        if e.code == 400 or "API_KEY_INVALID" in body or "INVALID_ARGUMENT" in body:
+            return "❌ **请求参数错误**，请联系管理员检查 API 配置。"
+        if e.code == 403:
+            return "❌ **API Key 权限不足**，请检查 Gemini API 是否已启用。"
+        if e.code == 503 or e.code == 500:
+            return "⚠️ **Gemini 服务暂时不可用**，请稍后重试。"
+        return f"⚠️ 服务暂时异常（错误码 {e.code}），请稍后再试。"
     except Exception as e:
-        return f"❌ 请求失败：{str(e)}"
+        err = str(e)
+        if "timed out" in err.lower():
+            return "⚠️ **请求超时**，Gemini 服务响应较慢，请稍后重试。"
+        return f"⚠️ 连接异常，请检查网络后重试。"
 
 
 # ================================================================
@@ -682,16 +706,10 @@ def main():
 
         st.divider()
 
-        # ── Gemini API 配置 ──
+        # ── AI 顾问状态标识（Key 已内置，无需用户输入）──
         st.markdown("### 🤖 AI 风味顾问")
-        st.markdown('<div class="sec-label">Gemini API Key</div>', unsafe_allow_html=True)
-        gemini_key = st.text_input(
-            "API Key", type="password", placeholder="AIzaSy...",
-            label_visibility="collapsed", key="gemini_key")
-        if gemini_key:
-            st.success("✅ API Key 已设置", icon="🔑")
-        else:
-            st.caption("[获取免费 API Key →](https://aistudio.google.com/app/apikey)")
+        st.success("✅ AI 顾问已就绪", icon="🧬")
+        st.caption("选择食材后，在页面底部与 AI 顾问对话")
 
         st.divider()
         st.caption("数据来源：FlavorDB · 551 种食材 · 464 个风味维度")
@@ -993,17 +1011,10 @@ def main():
     # ── Gemini 对话区 ──
     st.markdown("---")
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("<h4>🤖 AI 风味顾问 · Gemini</h4>", unsafe_allow_html=True)
+    st.markdown(f'<h4>🧬 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2} 的分子分析数据</span></h4>', unsafe_allow_html=True)
 
-    gemini_key = st.session_state.get("gemini_key","")
-    if not gemini_key:
-        st.markdown(f"""
-        <div class="diag diag-info">
-          <b>🔑 开启 AI 深度对话</b><br>
-          <span>在左侧边栏输入你的 <b>Gemini API Key</b>，即可与 AI 风味顾问就当前搭配（{cn1} + {cn2}）进行专业探讨。<br>
-          <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#7B2FF7">→ 免费获取 API Key（Google AI Studio）</a></span>
-        </div>""", unsafe_allow_html=True)
-    else:
+    # API Key 已内置，直接展示对话区
+    if True:
         # 初始化对话历史
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
@@ -1030,26 +1041,39 @@ def main():
             chat_html += "</div>"
             st.markdown(chat_html, unsafe_allow_html=True)
         else:
+            # 动态生成引导卡，基于当前搭配类型给出针对性引导
+            type_hints = {
+                "resonance": f"它们共享大量相同的芳香分子，属于「同源共振」型搭配，适合用叠加增强来放大共鸣。",
+                "contrast":  f"它们风味差异显著，属于「对比碰撞」型搭配，高明的厨师会用这种张力创造层次感。",
+                "neutral":   f"它们适度交叠互补，属于「平衡搭档」型搭配，比例调整是提升这个组合的关键。",
+            }
+            hint_text = type_hints.get(sim["type"], "")
             st.markdown(f"""
-            <div class="diag diag-res" style="margin-bottom:8px">
-              <b>🧑‍🍳 AI 顾问已就绪</b><br>
-              <span>当前分析：<b>{cn1}</b> + <b>{cn2}</b>（共鸣指数 {sim['score']}%）<br>
-              你可以问我：这两种食材如何搭配？有什么经典菜式？如何改进比例？</span>
+            <div class="diag diag-res" style="margin-bottom:12px">
+              <b style="font-size:1rem">🧬 关于 {cn1} × {cn2} 这个搭配</b><br><br>
+              <span>{hint_text}</span><br><br>
+              <span style="color:var(--text-muted);font-size:.85rem">
+                💬 <b>你可以问我：</b><br>
+                · 为什么选 {cn1} 作为主食材，而不是其他？<br>
+                · 如果我手边没有 {cn2}，有什么替代方案？<br>
+                · 这两种食材在数据库里没有收录的搭配方式是什么？<br>
+                · 请帮我设计一道突出这个搭配的完整菜谱
+              </span>
             </div>""", unsafe_allow_html=True)
 
         # 快捷问题按钮
         st.markdown("<div style='margin-bottom:8px'>", unsafe_allow_html=True)
         quick_qs = [
-            f"详细解释 {cn1} 和 {cn2} 为什么能搭配",
-            f"推荐一道结合 {cn1} 和 {cn2} 的经典菜式",
-            f"这个搭配适合什么菜系？",
-            f"如何优化比例提升整体风味？",
+            f"为什么 {cn1} 要作为主食材？换成其他食材会怎样？",
+            f"用 {cn1} + {cn2} 设计一道完整菜谱，含烹饪步骤",
+            f"如果数据库里没有我想要的食材，我该怎么描述给你？",
+            f"当前 {int(ratios.get(n1,0.5)*100)}% vs {int(ratios.get(n2,0.5)*100)}% 的比例是最优的吗？",
         ]
         qcols = st.columns(2)
         for qi, q in enumerate(quick_qs):
             if qcols[qi%2].button(q, key=f"qbtn_{qi}", use_container_width=True):
                 with st.spinner("AI 思考中..."):
-                    resp = call_gemini(gemini_key, st.session_state.chat_history + [{"role":"user","content":q}], context_str)
+                    resp = call_gemini(st.session_state.chat_history + [{"role":"user","content":q}], context_str)
                 st.session_state.chat_history.append({"role":"user","content":q})
                 st.session_state.chat_history.append({"role":"assistant","content":resp})
                 st.rerun()
@@ -1057,14 +1081,15 @@ def main():
 
         # 输入框
         user_input = st.text_input(
-            "向 AI 顾问提问...", placeholder=f"例如：{cn1}和{cn2}搭配时，用什么温度更好？",
+            "向风味顾问提问...",
+            placeholder=f"例如：我想用榴莲+{cn2}，数据库没有榴莲但我知道它有硫化物气息，请帮我分析...",
             key="gemini_input", label_visibility="collapsed")
         col_send, col_clear = st.columns([4,1])
         with col_send:
-            if st.button("发送 ➤", key="send_btn", use_container_width=True, type="primary"):
+            if st.button("发送给风味顾问 ➤", key="send_btn", use_container_width=True, type="primary"):
                 if user_input.strip():
                     with st.spinner("AI 思考中..."):
-                        resp = call_gemini(gemini_key, st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
+                        resp = call_gemini(st.session_state.chat_history + [{"role":"user","content":user_input}], context_str)
                     st.session_state.chat_history.append({"role":"user","content":user_input})
                     st.session_state.chat_history.append({"role":"assistant","content":resp})
                     st.rerun()
