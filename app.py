@@ -1,34 +1,24 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import google.generativeai as genai  # 核心依赖
+import google.generativeai as genai
 import json, os, random, math, re
-from math import sqrt
 
-# --- 系统级 Key 读取逻辑 (闭环方案) ---
-def initialize_system_api():
-    # 1. 尝试从 Streamlit Secrets 读取
-    api_key = st.secrets.get("GEMINI_API_KEY", "")
-    
-    # 2. 如果云端没有，尝试从 config 读取
-    if not api_key or "YOUR_API_KEY" in api_key:
-        try:
-            import config as _cfg
-            api_key = getattr(_cfg, "GEMINI_API_KEY", "")
-        except:
-            pass
-            
-    # 3. 过滤掉占位符
-    if "YOUR_API_KEY" in api_key:
-        api_key = ""
-        
-    return api_key
+# --- 核心安全配置 ---
+def get_final_key():
+    if "GEMINI_API_KEY" in st.secrets:
+        return st.secrets["GEMINI_API_KEY"]
+    try:
+        import config as _cfg
+        return getattr(_cfg, "GEMINI_API_KEY", "")
+    except:
+        return ""
 
-active_key = initialize_system_api()
+active_key = get_final_key()
 _GEMINI_MODEL = "gemini-2.0-flash"
 
-# 初始化 SDK (防止主页因未初始化崩溃)
-if active_key:
+# 系统级点火：如果 key 存在，立即配置 SDK
+if active_key and "AIza" in active_key:
     genai.configure(api_key=active_key)
 # ================================================================
 # 0. 页面配置
@@ -556,36 +546,26 @@ def tech_tip(term):
 # 7. Gemini API 优化对话引擎 (V3.0 取长补短版)
 # ================================================================
 def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """系统化优化版：解决 urllib 导致的 400 错误"""
-    if not api_key:
-        return "❌ <b>未检测到有效 API Key</b>。请在侧边栏手动输入或在后台配置 Secrets。"
+    """系统化 SDK 调用版"""
+    if not api_key or "YOUR_API_KEY" in api_key:
+        return "❌ <b>API Key 未配置</b>。请在侧边栏输入或配置 Secrets。"
 
     try:
-        # 使用官方 SDK 模型
+        # 这里的 genai 已经在顶部 configure 过了
         model = genai.GenerativeModel(_GEMINI_MODEL)
         
-        # 构建专业 Prompt
-        system_instruction = (
-            "你是「风味虫洞」专属 AI 顾问。拥有分子烹饪和风味化学背景。\n"
-            "【已知数据】: " + context + "\n"
-            "请基于以上数据回答，风格专业亲切，使用中文。每次回答最后提一个延伸问题。"
-        )
+        system_prompt = f"你是「风味虫洞」专业顾问。数据：{context}\n请专业地回答，用中文，结尾提一个问题。"
 
-        # 转换历史记录格式
-        history_formatted = []
+        # 转换格式以匹配 SDK
+        history = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
-            history_formatted.append({"role": role, "parts": [msg["content"]]})
+            history.append({"role": role, "parts": [msg["content"]]})
 
-        # 发起流式或全量请求
-        response = model.generate_content([system_instruction] + history_formatted)
+        response = model.generate_content([system_prompt] + history)
         return response.text
-
     except Exception as e:
-        err_msg = str(e)
-        if "429" in err_msg: return "⚠️ AI 顾问太忙了(429)，请稍等片刻。"
-        if "API_KEY_INVALID" in err_msg: return "❌ Key 无效，请检查配置。"
-        return f"⚠️ 助手连接中断: {err_msg}"
+        return f"⚠️ 助手离线: {str(e)}"
 
 
 # 8. 欢迎页
