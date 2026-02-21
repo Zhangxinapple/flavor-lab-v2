@@ -1,15 +1,15 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import google.generativeai as genai
+import google.generativeai as genai  # 核心：使用官方SDK
 import json, os, random, math, re
 
-# --- 1. 核心安全配置：读取 Key ---
-def get_final_key():
-    # 优先读云端 Secrets
+# --- A. 系统级 Key 读取逻辑 ---
+def get_safe_api_key():
+    # 优先级 1: Streamlit Secrets (部署环境)
     if "GEMINI_API_KEY" in st.secrets:
         return st.secrets["GEMINI_API_KEY"]
-    # 其次读 config.py
+    # 优先级 2: config.py (本地开发)
     try:
         import config as _cfg
         if hasattr(_cfg, "GEMINI_API_KEY") and "AIza" in _cfg.GEMINI_API_KEY:
@@ -18,8 +18,13 @@ def get_final_key():
         pass
     return ""
 
-active_key = get_final_key()
-_GEMINI_MODEL = "gemini-2.0-flash" # 统一模型变量名
+# 初始化全局变量
+active_key = get_safe_api_key()
+_GEMINI_MODEL = "gemini-2.0-flash" 
+
+# --- B. 引擎全局配置 (这是你之前缺失的关键一步) ---
+if active_key:
+    genai.configure(api_key=active_key)
 # ================================================================
 # 0. 页面配置
 # ================================================================
@@ -546,70 +551,47 @@ def tech_tip(term):
 # 7. Gemini API 优化对话引擎 (V3.0 取长补短版)
 # ================================================================
 def call_gemini(api_key: str, messages: list, context: str) -> str:
-    """
-    融合版逻辑：
-    1. 采用官方 SDK (genai) 替代不稳定的 urllib
-    2. 保留原有的专业 Chef Prompt 体系
-    3. 增强了上下文关联能力和错误诊断
-    """
-    import google.generativeai as genai
-    
-    if not api_key or not api_key.strip() or api_key == "YOUR_API_KEY_HERE":
-        return "❌ <b>未配置有效 API Key</b>，请在左侧栏输入或在 Secrets 中配置。"
+    """系统性优化版：融合专业Prompt与官方稳定SDK"""
+    if not api_key:
+        return "❌ <b>未检测到 API Key</b>。请在侧边栏或 Secrets 中配置。"
 
     try:
-        # 1. 引擎配置
-        genai.configure(api_key=api_key.strip())
-        # 使用你 config 里的模型，如果没有则默认 2.0-flash (目前最快最强)
-        model_name = globals().get('_GEMINI_MODEL', 'gemini-2.0-flash')
-        model = genai.GenerativeModel(model_name)
-
-        # 2. 构造系统指令 (保留并强化了你的原版内容)
+        # 使用顶部已配置好的 genai
+        model = genai.GenerativeModel(_GEMINI_MODEL)
+        
+        # 1. 注入你设计的专业主厨系统提示词
         system_prompt = (
             "你是「风味虫洞」专属 AI 顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
             "【当前搭配数据】\n" + context + "\n\n"
-            "【任务要求】\n"
-            "1. 深入分析食材间的分子共鸣（如共享的香气化合物）。\n"
-            "2. 若数据库无此食材，请基于知识库（如：含硫量、挥发性脂肪酸）进行科学模拟。\n"
-            "3. 引导用户思考比例调整与烹饪技法（澄清、球化、真空低温等）。\n"
-            "4. 回答风格：专业且亲切的中文，结尾提出一个延伸问题。\n"
+            "【你的任务】\n"
+            "1. 基于分子数据帮助用户深入理解食材搭配的科学原理\n"
+            "2. 当用户描述数据库没有的食材时，基于科学知识库估计其分子特征\n"
+            "3. 主动引导思考：主次比例、实际落地方案（如：真空低温、乳化、液氮）\n"
+            "4. 回答风格：专业且亲切的中文，结尾提出一个延伸问题引导探索。"
         )
 
-        # 3. 构造对话流 (适配官方 SDK 格式)
-        # 将历史记录与 System Prompt 结合
-        chat_session = []
+        # 2. 构造符合 SDK 要求的对话历史
+        history_for_sdk = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
-            chat_session.append({"role": role, "parts": [msg["content"]]})
+            history_for_sdk.append({"role": role, "parts": [msg["content"]]})
 
-        # 4. 发起调用 (加入安全保护)
-        # 注意：我们将 system_prompt 放在第一条消息的开头，确保 AI 始终记住人设
-        if chat_session:
-            chat_session[0]["parts"][0] = system_prompt + "\n\n" + chat_session[0]["parts"][0]
-        else:
-            chat_session = [{"role": "user", "parts": [system_prompt + "\n\n你好，请开始我的风味实验报告。"]}]
-
+        # 3. 发起请求 (将人设作为第一条指令)
+        full_content = [{"role": "user", "parts": [system_prompt]}] + history_for_sdk
+        
         response = model.generate_content(
-            chat_session,
-            generation_config={
-                "temperature": 0.8,
-                "top_p": 0.95,
-                "max_output_tokens": 1024,
-            }
+            full_content,
+            generation_config={"temperature": 0.8, "max_output_tokens": 1024}
         )
-
+        
         return response.text
 
     except Exception as e:
+        # 系统性错误捕获
         err_msg = str(e)
-        # 精准捕获常见错误并返回中文提示
-        if "429" in err_msg:
-            return "⚠️ <b>请求频率超限</b>：免费版每分钟限制较多，请等待 30 秒再试。"
-        if "API_KEY_INVALID" in err_msg or "401" in err_msg:
-            return "❌ <b>API Key 无效</b>：请检查你的 Key 是否正确或已被 Google 停用。"
-        if "quota" in err_msg:
-            return "⚠️ <b>配额耗尽</b>：请检查 Google AI Studio 的使用额度。"
-        return f"⚠️ <b>AI 引擎连接异常</b>：{err_msg}"
+        if "429" in err_msg: return "⚠️ 请求太频繁，AI 顾问正在休息，请稍等一分钟。"
+        if "API_KEY_INVALID" in err_msg: return "❌ API Key 校验失败，请检查密钥是否有效。"
+        return f"⚠️ 助手离线 (错误: {err_msg})"
 
 
 # 8. 欢迎页
