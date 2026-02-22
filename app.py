@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化状态
+# 初始化状态（页面首次加载时重置分类选择，避免缓存残留）
 if "language" not in st.session_state:
     st.session_state.language = "zh"
 if "chat_history" not in st.session_state:
@@ -24,8 +24,11 @@ if "chat_context_key" not in st.session_state:
     st.session_state.chat_context_key = ""
 if "last_api_error" not in st.session_state:
     st.session_state.last_api_error = None
+# 分类选择默认植物基（Vegan优先），刷新后归零
 if "selected_cats" not in st.session_state:
     st.session_state.selected_cats = set()
+if "vegan_default_set" not in st.session_state:
+    st.session_state.vegan_default_set = True  # 默认开启Vegan
 
 def t(text_en, text_zh=None):
     if st.session_state.language == "zh":
@@ -36,35 +39,57 @@ def t(text_en, text_zh=None):
 # 1. API 配置管理
 # ================================================================
 def get_api_config():
+    # ── 优先级1：环境变量（本地 ~/.zshrc 配置）──
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "")
+    if dashscope_key:
+        return {
+            "provider": "dashscope",
+            "api_key": dashscope_key,
+            "model": os.getenv("DASHSCOPE_MODEL", "qwen-turbo"),
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        }
+    gemini_env = os.getenv("GEMINI_API_KEY", "")
+    if gemini_env:
+        return {"provider": "gemini", "api_key": gemini_env,
+                "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash")}
+    openai_env = os.getenv("OPENAI_API_KEY", "")
+    if openai_env:
+        return {"provider": "openai", "api_key": openai_env,
+                "model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1"}
+
+    # ── 优先级2：config.py 文件 ──
+    try:
+        import config as _cfg
+        if hasattr(_cfg, "DASHSCOPE_API_KEY") and _cfg.DASHSCOPE_API_KEY:
+            return {"provider": "dashscope", "api_key": _cfg.DASHSCOPE_API_KEY,
+                    "model": getattr(_cfg, "DASHSCOPE_MODEL", "qwen-turbo"),
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}
+        if hasattr(_cfg, "GEMINI_API_KEY") and _cfg.GEMINI_API_KEY:
+            return {"provider": "gemini", "api_key": _cfg.GEMINI_API_KEY,
+                    "model": getattr(_cfg, "GEMINI_MODEL", "gemini-2.0-flash")}
+    except Exception:
+        pass
+
+    # ── 优先级3：Streamlit Secrets（Cloud 部署）──
     try:
         secrets = st.secrets
-        if "OPENAI_API_KEY" in secrets:
-            return {
-                "provider": "openai",
-                "api_key": secrets["OPENAI_API_KEY"],
-                "model": secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
-                "base_url": secrets.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-            }
+        if "DASHSCOPE_API_KEY" in secrets:
+            return {"provider": "dashscope", "api_key": secrets["DASHSCOPE_API_KEY"],
+                    "model": secrets.get("DASHSCOPE_MODEL", "qwen-turbo"),
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}
         if "GEMINI_API_KEY" in secrets:
-            return {
-                "provider": "gemini",
-                "api_key": secrets["GEMINI_API_KEY"],
-                "model": secrets.get("GEMINI_MODEL", "gemini-2.0-flash")
-            }
-        if "CLAUDE_API_KEY" in secrets:
-            return {
-                "provider": "claude",
-                "api_key": secrets["CLAUDE_API_KEY"],
-                "model": secrets.get("CLAUDE_MODEL", "claude-3-haiku-20240307")
-            }
+            return {"provider": "gemini", "api_key": secrets["GEMINI_API_KEY"],
+                    "model": secrets.get("GEMINI_MODEL", "gemini-2.0-flash")}
+        if "OPENAI_API_KEY" in secrets:
+            return {"provider": "openai", "api_key": secrets["OPENAI_API_KEY"],
+                    "model": secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
+                    "base_url": secrets.get("OPENAI_BASE_URL", "https://api.openai.com/v1")}
         if "API_KEY" in secrets:
-            return {
-                "provider": secrets.get("API_PROVIDER", "openai"),
-                "api_key": secrets["API_KEY"],
-                "model": secrets.get("API_MODEL", "gpt-3.5-turbo"),
-                "base_url": secrets.get("API_BASE_URL", "https://api.openai.com/v1")
-            }
-    except:
+            return {"provider": secrets.get("API_PROVIDER", "openai"),
+                    "api_key": secrets["API_KEY"],
+                    "model": secrets.get("API_MODEL", "gpt-3.5-turbo"),
+                    "base_url": secrets.get("API_BASE_URL", "https://api.openai.com/v1")}
+    except Exception:
         pass
     return None
 
@@ -88,21 +113,28 @@ def call_ai_api(messages, context, max_retries=2):
     provider = config.get("provider", "gemini")
     
     system_prompt = (
-        "你是「风味虫洞」的专属 AI 风味顾问，拥有分子烹饪、风味化学和米其林餐厅经验。\n\n"
-        "【当前搭配数据】\n" + context + "\n\n"
-        "【你的任务】\n"
-        "1. 基于上方分子数据帮助用户深入理解食材搭配的科学原理\n"
-        "2. 当用户描述数据库里没有的食材时，用知识库估计其风味分子特征来作答\n"
-        "3. 主动引导用户思考：主食材选择理由、比例调整效果、实际烹饪落地方案\n"
-        "4. 可引用具体风味分子名（如：己醛、芳樟醇）、化学原理或经典菜式案例\n"
-        "5. 遇到数据库没有的食材，明确告知并基于知识库分析\n\n"
-        "【回答风格】\n"
-        "- 专业但亲切的中文，像有深度的厨师朋友在交流\n"
-        "- 多用比喻和具体例子\n"
-        "- 每次回答结尾提出一个延伸问题引导用户继续探索"
+        "你是顶级「风味设计专家」与「分子美食科学家」，运营《味觉虫洞》实验室。"
+        "打破常规烹饪逻辑，用食材分子结构、味觉互补和嗅觉穿透力，提供极具创意的风味方案。\n\n"
+        "核心逻辑框架：\n"
+        "- 锚点法则（Anchoring）：以用户食材为核心，寻找产生虫洞连接的配对\n"
+        "- 分子共鸣（Molecular Profiling）：寻找共享香气分子的食材，如遇黑胡椒关联其木质调\n"
+        "- 维度补偿（Balance）：考虑酸甜苦咸鲜辛麻涩的平衡\n"
+        "- 极光效应（Aurora Effect）：关注能提升香气频率、产生鼻腔冲击力的组合\n\n"
+        "当前实验数据：\n" + context + "\n\n"
+        "每次回答结构：\n"
+        "🛰️ 虫洞坐标：食材味觉坐标（如：高频挥发辛凉 vs 低频坚果油脂）\n"
+        "🌀 关联逻辑：搭配原理（分子共鸣/味觉补偿/嗅觉电梯效应）\n"
+        "🧪 实验报告：入口→中段→尾韵的感官演变曲线\n"
+        "👨\u200d🍳 厨师应用：2-3个具体烹饪/研发场景\n"
+        "📊 风味星图参数：建议配比或关键技术处理\n\n"
+        "语气：专业前卫充满探索感，使用频率/维度/碰撞/共振等词汇。"
+        "对中国本土食材（黄茶/陈皮/花椒）有深厚理解。"
+        "每次回答结尾提出一个前沿延伸问题。"
     )
     
-    if provider == "gemini":
+    if provider == "dashscope":
+        return _call_openai(config, messages, system_prompt, max_retries)  # DashScope 兼容 OpenAI 接口
+    elif provider == "gemini":
         return _call_gemini(config, messages, system_prompt, max_retries)
     elif provider == "openai":
         return _call_openai(config, messages, system_prompt, max_retries)
@@ -275,8 +307,57 @@ st.markdown("""
 .chat-wrap { max-height: 500px; overflow-y: auto; padding: 12px; background: var(--bg-main); border-radius: 12px; }
 .chat-time { font-size: 0.7rem; color: var(--text-faint); margin-top: 4px; text-align: right; }
 .sec-label { font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-faint) !important; margin: 14px 0 6px; }
+
+/* ── 侧边栏整体美化 ── */
+[data-testid="stSidebar"] > div:first-child { padding: 1rem 1rem 2rem; }
+[data-testid="stSidebar"] .stToggle { margin: 8px 0 4px; }
+[data-testid="stSidebar"] h3 { font-size: 1rem !important; color: var(--text-primary) !important; margin: 0 0 12px !important; }
+[data-testid="stSidebar"] .stSlider { padding: 4px 0; }
+[data-testid="stSidebar"] .stMultiSelect { margin-top: 2px; }
+[data-testid="stSidebar"] hr { margin: 12px 0 !important; opacity: 0.3; }
+
+/* ── 深色模式适配 ── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-main:#0F1117; --bg-sidebar:#1A1D27; --bg-card:#1E2130;
+    --bg-card-hover:#252840; --border-color:#2D3148;
+    --text-primary:#F0F2F8; --text-second:#C5CBD8;
+    --text-muted:#8B93A8; --text-faint:#5A6178;
+    --shadow:0 2px 12px rgba(0,0,0,0.3);
+  }
+}
+[data-theme="dark"] {
+  --bg-main:#0F1117; --bg-sidebar:#1A1D27; --bg-card:#1E2130;
+  --bg-card-hover:#252840; --border-color:#2D3148;
+  --text-primary:#F0F2F8; --text-second:#C5CBD8;
+  --text-muted:#8B93A8; --text-faint:#5A6178;
+}
+[data-theme="dark"] .diag-res { background:#0D2818 !important; }
+[data-theme="dark"] .diag-ctr { background:#2D1800 !important; }
+[data-theme="dark"] .diag-info { background:#0D1D3A !important; }
+[data-theme="dark"] .diag-warn { background:#2D2200 !important; }
+[data-theme="dark"] .diag b, [data-theme="dark"] .diag strong { color: var(--text-primary) !important; }
+[data-theme="dark"] .diag span { color: var(--text-second) !important; }
+[data-theme="dark"] .api-status.ready { background:#064E3B; color:#6EE7B7; }
+[data-theme="dark"] .api-status.error { background:#450A0A; color:#FCA5A5; }
+[data-theme="dark"] .api-status.warning { background:#451A03; color:#FCD34D; }
+[data-theme="dark"] .ing-row { background: var(--bg-card-hover) !important; }
+[data-theme="dark"] .chat-bubble-ai { background: var(--bg-card) !important; color: var(--text-primary) !important; }
+
+/* ── 欢迎卡片 ── */
+.welcome-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 20px; padding: 40px 48px; margin-bottom: 20px; box-shadow: var(--shadow); }
+.welcome-card h2 { color: var(--text-primary) !important; }
+.welcome-card p, .welcome-card li { color: var(--text-second) !important; }
+.step-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 16px 20px; flex: 1; min-width: 160px; }
+.step-card h4 { color: var(--text-primary) !important; margin: 6px 0 4px; }
+.step-card p { color: var(--text-muted) !important; font-size: .85rem; margin: 0; }
+
+/* ── hero 全宽（消除 column 产生的空白）── */
+.hero-header { width: 100%; box-sizing: border-box; }
+.block-container > div:first-child { padding: 0 !important; }
+
 #MainMenu, footer { visibility: hidden; }
-.block-container { padding-top: 1.2rem !important; }
+.block-container { padding-top: 1rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -495,7 +576,7 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim):
         return
     
     provider = api_config.get("provider", "unknown")
-    provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude"}
+    provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude", "dashscope": "通义千问"}
     provider_name = provider_names.get(provider, provider.upper())
     
     st.markdown(f'<div class="api-status ready"><span>✅</span><span>AI 顾问已连接 · {provider_name}</span></div>', unsafe_allow_html=True)
@@ -640,51 +721,77 @@ def main():
         st.error("❌ 找不到 flavordb_data.csv")
         st.stop()
 
-    # Hero + 语言切换
-    col_hero, col_lang = st.columns([6, 1])
-    with col_hero:
-        st.markdown("""
-        <div class="hero-header">
-          <span style="font-size:2.2rem">🧬</span>
-          <div>
-            <p class="hero-title">味觉虫洞 · Flavor Lab</p>
-            <p class="hero-sub">Professional Flavor Pairing Engine · V2.0</p>
-          </div>
+    # Hero 独占整行，语言按钮内嵌于 hero 右侧
+    st.markdown("""
+    <div class="hero-header" style="justify-content:space-between;align-items:center">
+      <div style="display:flex;align-items:center;gap:14px">
+        <span style="font-size:2.2rem">🧬</span>
+        <div>
+          <p class="hero-title">味觉虫洞 · Flavor Lab</p>
+          <p class="hero-sub">Professional Flavor Pairing Engine · V2.0</p>
         </div>
-        """, unsafe_allow_html=True)
-    with col_lang:
-        if st.button("🌐 EN/中", key="lang_toggle"):
-            st.session_state.language = "en" if st.session_state.language == "zh" else "zh"
-            st.rerun()
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # 侧边栏
     with st.sidebar:
         st.markdown("### 🔬 实验参数")
 
-        all_cats = sorted(df["category"].unique().tolist())
-        st.markdown('<div class="sec-label">🗂 按分类筛选</div>', unsafe_allow_html=True)
+        # ── Vegan 模式（默认开启）──
+        ANIMAL_KEYWORDS = ["meat","dairy","fish","seafood","pork","beef","chicken","egg"]
+        ANIMAL_CATS_EN = {"Meat","Dairy","Fish","Seafood","Egg","Beverage Alcoholic","Beverage Alcoholic Distilled"}
         
-        cat_cols = st.columns(3)
-        for i, cat in enumerate(all_cats[:12]):
+        is_vegan = st.toggle("🌿 仅植物基 Vegan", value=st.session_state.vegan_default_set, key="vegan_toggle")
+        st.session_state.vegan_default_set = is_vegan
+
+        # ── 分类筛选 pill 按钮 ──
+        all_cats = sorted(df["category"].unique().tolist())
+        st.markdown('<div class="sec-label">🗂 按分类筛选（多选）</div>', unsafe_allow_html=True)
+
+        # 生成 pill HTML，Vegan模式下动物类显示但置灰禁用
+        pill_html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">'
+        for cat in all_cats:
             cat_zh = t_category(cat)
             is_active = cat in st.session_state.selected_cats
-            btn_style = "primary" if is_active else "secondary"
-            if cat_cols[i % 3].button(cat_zh, key=f"cat_{cat}", use_container_width=True, type=btn_style):
-                if is_active:
-                    st.session_state.selected_cats.discard(cat)
-                else:
-                    st.session_state.selected_cats.add(cat)
-                st.rerun()
+            is_animal = any(kw in cat.lower() for kw in ANIMAL_KEYWORDS) or cat in ANIMAL_CATS_EN
+            disabled = is_vegan and is_animal
+            if disabled:
+                pill_html += (f'<span style="display:inline-block;padding:4px 10px;border-radius:20px;' +
+                    f'background:#F3F4F6;color:#9CA3AF;font-size:.75rem;border:1px solid #E5E7EB;' +
+                    f'cursor:not-allowed;opacity:0.5" title="Vegan模式下不可选">{cat_zh}</span>')
+            elif is_active:
+                pill_html += (f'<span onclick="void(0)" style="display:inline-block;padding:4px 10px;border-radius:20px;' +
+                    f'background:linear-gradient(135deg,#7B2FF7,#00D2FF);color:#fff;' +
+                    f'font-size:.75rem;font-weight:700;border:1px solid transparent;cursor:pointer">{cat_zh} ✕</span>')
+            else:
+                pill_html += (f'<span style="display:inline-block;padding:4px 10px;border-radius:20px;' +
+                    f'background:#F0FDF4;color:#16A34A;font-size:.75rem;border:1px solid #BBF7D0;cursor:pointer">{cat_zh}</span>')
+        pill_html += '</div>'
+        st.markdown(pill_html, unsafe_allow_html=True)
+
+        # 实际可交互的 multiselect（隐藏样式，用于状态管理）
+        available_cats = [c for c in all_cats if not (is_vegan and (any(kw in c.lower() for kw in ANIMAL_KEYWORDS) or c in ANIMAL_CATS_EN))]
+        # 清理已选中的动物类（Vegan开启时）
+        if is_vegan:
+            st.session_state.selected_cats = {c for c in st.session_state.selected_cats if c in available_cats}
         
+        selected_cats_list = st.multiselect(
+            "选择分类", options=available_cats,
+            default=list(st.session_state.selected_cats),
+            format_func=t_category,
+            label_visibility="collapsed", key="cat_multiselect"
+        )
+        st.session_state.selected_cats = set(selected_cats_list)
+
         if st.session_state.selected_cats:
             df_show = df[df["category"].isin(st.session_state.selected_cats)]
         else:
             df_show = df
 
-        is_vegan = st.toggle("🍃 仅植物基 Vegan", value=False)
         if is_vegan:
-            excl = ["meat","dairy","fish","seafood","pork","beef","chicken","egg"]
-            df_show = df_show[~df_show["category"].str.lower().apply(lambda c: any(kw in c for kw in excl))]
+            df_show = df_show[~df_show["category"].str.lower().apply(
+                lambda c: any(kw in c for kw in ANIMAL_KEYWORDS))]
 
         st.markdown('<div class="sec-label">🔍 搜索食材</div>', unsafe_allow_html=True)
         search_query = st.text_input("输入名称搜索...", key="search_box", label_visibility="collapsed")
@@ -721,7 +828,7 @@ def main():
         
         if api_ok:
             provider = api_config.get("provider", "unknown")
-            provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude"}
+            provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude", "dashscope": "通义千问"}
             st.markdown(f'<div class="api-status ready"><span>✅</span><span>已连接 · {provider_names.get(provider, provider.upper())}</span></div>', unsafe_allow_html=True)
         elif api_config:
             st.markdown('<div class="api-status warning"><span>⚠️</span><span>配置异常，请检查 Key</span></div>', unsafe_allow_html=True)
