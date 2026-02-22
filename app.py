@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化状态（页面首次加载时重置分类选择，避免缓存残留）
+# 初始化状态
 if "language" not in st.session_state:
     st.session_state.language = "zh"
 if "chat_history" not in st.session_state:
@@ -24,11 +24,8 @@ if "chat_context_key" not in st.session_state:
     st.session_state.chat_context_key = ""
 if "last_api_error" not in st.session_state:
     st.session_state.last_api_error = None
-# 分类选择默认植物基（Vegan优先），刷新后归零
 if "selected_cats" not in st.session_state:
     st.session_state.selected_cats = set()
-if "vegan_default_set" not in st.session_state:
-    st.session_state.vegan_default_set = True  # 默认开启Vegan
 
 def t(text_en, text_zh=None):
     if st.session_state.language == "zh":
@@ -39,56 +36,44 @@ def t(text_en, text_zh=None):
 # 1. API 配置管理
 # ================================================================
 def get_api_config():
-    # ── 优先级1：环境变量（本地 ~/.zshrc 配置）──
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "")
-    if dashscope_key:
-        return {
-            "provider": "dashscope",
-            "api_key": dashscope_key,
-            "model": os.getenv("DASHSCOPE_MODEL", "qwen-turbo"),
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        }
-    gemini_env = os.getenv("GEMINI_API_KEY", "")
-    if gemini_env:
-        return {"provider": "gemini", "api_key": gemini_env,
-                "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash")}
-    openai_env = os.getenv("OPENAI_API_KEY", "")
-    if openai_env:
-        return {"provider": "openai", "api_key": openai_env,
-                "model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1"}
+    """API 优先级：环境变量 > Streamlit Secrets > config.py"""
+    DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-    # ── 优先级2：config.py 文件 ──
-    try:
-        import config as _cfg
-        if hasattr(_cfg, "DASHSCOPE_API_KEY") and _cfg.DASHSCOPE_API_KEY:
-            return {"provider": "dashscope", "api_key": _cfg.DASHSCOPE_API_KEY,
-                    "model": getattr(_cfg, "DASHSCOPE_MODEL", "qwen-turbo"),
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}
-        if hasattr(_cfg, "GEMINI_API_KEY") and _cfg.GEMINI_API_KEY:
-            return {"provider": "gemini", "api_key": _cfg.GEMINI_API_KEY,
-                    "model": getattr(_cfg, "GEMINI_MODEL", "gemini-2.0-flash")}
-    except Exception:
-        pass
+    # ── 1. 环境变量（本地 ~/.zshrc 已配置时自动生效）──
+    ds_env = os.getenv("DASHSCOPE_API_KEY", "")
+    if ds_env:
+        return {"provider": "dashscope", "api_key": ds_env,
+                "model": os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
+                "base_url": DASHSCOPE_BASE}
 
-    # ── 优先级3：Streamlit Secrets（Cloud 部署）──
+    # ── 2. Streamlit Cloud Secrets ──
     try:
         secrets = st.secrets
-        if "DASHSCOPE_API_KEY" in secrets:
-            return {"provider": "dashscope", "api_key": secrets["DASHSCOPE_API_KEY"],
-                    "model": secrets.get("DASHSCOPE_MODEL", "qwen-turbo"),
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}
-        if "GEMINI_API_KEY" in secrets:
+        if "DASHSCOPE_API_KEY" in secrets and secrets["DASHSCOPE_API_KEY"]:
+            return {"provider": "dashscope",
+                    "api_key": secrets["DASHSCOPE_API_KEY"],
+                    "model": secrets.get("DASHSCOPE_MODEL", "qwen-plus"),
+                    "base_url": DASHSCOPE_BASE}
+        if "GEMINI_API_KEY" in secrets and secrets["GEMINI_API_KEY"]:
             return {"provider": "gemini", "api_key": secrets["GEMINI_API_KEY"],
                     "model": secrets.get("GEMINI_MODEL", "gemini-2.0-flash")}
-        if "OPENAI_API_KEY" in secrets:
+        if "OPENAI_API_KEY" in secrets and secrets["OPENAI_API_KEY"]:
             return {"provider": "openai", "api_key": secrets["OPENAI_API_KEY"],
                     "model": secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
                     "base_url": secrets.get("OPENAI_BASE_URL", "https://api.openai.com/v1")}
-        if "API_KEY" in secrets:
-            return {"provider": secrets.get("API_PROVIDER", "openai"),
-                    "api_key": secrets["API_KEY"],
-                    "model": secrets.get("API_MODEL", "gpt-3.5-turbo"),
-                    "base_url": secrets.get("API_BASE_URL", "https://api.openai.com/v1")}
+    except Exception:
+        pass
+
+    # ── 3. config.py 本地文件 ──
+    try:
+        import config as _cfg
+        if getattr(_cfg, "DASHSCOPE_API_KEY", ""):
+            return {"provider": "dashscope", "api_key": _cfg.DASHSCOPE_API_KEY,
+                    "model": getattr(_cfg, "DASHSCOPE_MODEL", "qwen-plus"),
+                    "base_url": DASHSCOPE_BASE}
+        if getattr(_cfg, "GEMINI_API_KEY", ""):
+            return {"provider": "gemini", "api_key": _cfg.GEMINI_API_KEY,
+                    "model": getattr(_cfg, "GEMINI_MODEL", "gemini-2.0-flash")}
     except Exception:
         pass
     return None
@@ -113,31 +98,32 @@ def call_ai_api(messages, context, max_retries=2):
     provider = config.get("provider", "gemini")
     
     system_prompt = (
-        "你是顶级「风味设计专家」与「分子美食科学家」，运营《味觉虫洞》实验室。"
-        "打破常规烹饪逻辑，用食材分子结构、味觉互补和嗅觉穿透力，提供极具创意的风味方案。\n\n"
-        "核心逻辑框架：\n"
-        "- 锚点法则（Anchoring）：以用户食材为核心，寻找产生虫洞连接的配对\n"
-        "- 分子共鸣（Molecular Profiling）：寻找共享香气分子的食材，如遇黑胡椒关联其木质调\n"
-        "- 维度补偿（Balance）：考虑酸甜苦咸鲜辛麻涩的平衡\n"
+        "你是一位顶级的「风味设计专家」与「分子美食科学家」。"
+        "你运营着一个名为《味觉虫洞》的实验室，打破常规烹饪逻辑，"
+        "利用食材的分子结构、味觉互补和嗅觉穿透力，为设计师和厨师提供极具创意的风味组合方案。\n\n"
+        "【核心逻辑框架】\n"
+        "- 锚点法则（Anchoring）：以用户食材为核心，寻找「虫洞连接」的配对\n"
+        "- 分子共鸣（Molecular Profiling）：寻找共享香气分子，如遇黑胡椒关联木质调\n"
+        "- 维度补偿（Balance）：酸、甜、苦、咸、鲜、辛、麻、涩的动态平衡\n"
         "- 极光效应（Aurora Effect）：关注能提升香气频率、产生鼻腔冲击力的组合\n\n"
-        "当前实验数据：\n" + context + "\n\n"
-        "每次回答结构：\n"
-        "🛰️ 虫洞坐标：食材味觉坐标（如：高频挥发辛凉 vs 低频坚果油脂）\n"
+        "【当前实验数据】\n" + context + "\n\n"
+        "【回复必须包含的模块】\n"
+        "🛰️ 虫洞坐标：食材的味觉坐标（如：[高频挥发辛凉] vs [低频坚果油脂]）\n"
         "🌀 关联逻辑：搭配原理（分子共鸣/味觉补偿/嗅觉电梯效应）\n"
         "🧪 实验报告：入口→中段→尾韵的感官演变曲线\n"
-        "👨\u200d🍳 厨师应用：2-3个具体烹饪/研发场景\n"
+        "👨\u200d🍳 厨师应用：2-3个具体烹饪/研发场景（前菜/主菜/甜点/饮品）\n"
         "📊 风味星图参数：建议配比或关键技术处理\n\n"
-        "语气：专业前卫充满探索感，使用频率/维度/碰撞/共振等词汇。"
-        "对中国本土食材（黄茶/陈皮/花椒）有深厚理解。"
+        "【语气与风格】\n"
+        "专业前卫、充满探索感。使用「频率/维度/碰撞/坍缩/共振」等词汇。"
+        "对中国本土食材（黄茶/陈皮/益智仁/花椒）有深厚理解。"
         "每次回答结尾提出一个前沿延伸问题。"
     )
     
-    if provider == "dashscope":
-        return _call_openai(config, messages, system_prompt, max_retries)  # DashScope 兼容 OpenAI 接口
+    # DashScope 使用 OpenAI 兼容模式（完全一致）
+    if provider in ("dashscope", "openai"):
+        return _call_openai(config, messages, system_prompt, max_retries)
     elif provider == "gemini":
         return _call_gemini(config, messages, system_prompt, max_retries)
-    elif provider == "openai":
-        return _call_openai(config, messages, system_prompt, max_retries)
     elif provider == "claude":
         return _call_claude(config, messages, system_prompt, max_retries)
     else:
@@ -260,6 +246,7 @@ st.markdown("""
 .hero-sub { font-size: .75rem; color: rgba(255,255,255,.42) !important; margin: 0; letter-spacing: .08em; text-transform: uppercase; }
 .card { background: var(--bg-card); padding: 20px; border-radius: 16px; box-shadow: var(--shadow); margin-bottom: 16px; border: 1px solid var(--border-color); }
 .card h4, .card b, .card strong { color: var(--text-primary) !important; }
+.card-title { margin: 0 0 14px 0 !important; font-size: 1rem !important; font-weight: 700 !important; color: var(--text-primary) !important; display: flex; align-items: center; gap: 6px; }
 .card p, .card span, .card div { color: var(--text-second) !important; }
 .card-dark { background: linear-gradient(135deg,#0A0A1A,#1A1A3E); padding: 22px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,.3); margin-bottom: 16px; border: 1px solid rgba(255,255,255,.08); text-align: center; }
 .card-dark, .card-dark * { color: #FFFFFF !important; }
@@ -307,57 +294,8 @@ st.markdown("""
 .chat-wrap { max-height: 500px; overflow-y: auto; padding: 12px; background: var(--bg-main); border-radius: 12px; }
 .chat-time { font-size: 0.7rem; color: var(--text-faint); margin-top: 4px; text-align: right; }
 .sec-label { font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-faint) !important; margin: 14px 0 6px; }
-
-/* ── 侧边栏整体美化 ── */
-[data-testid="stSidebar"] > div:first-child { padding: 1rem 1rem 2rem; }
-[data-testid="stSidebar"] .stToggle { margin: 8px 0 4px; }
-[data-testid="stSidebar"] h3 { font-size: 1rem !important; color: var(--text-primary) !important; margin: 0 0 12px !important; }
-[data-testid="stSidebar"] .stSlider { padding: 4px 0; }
-[data-testid="stSidebar"] .stMultiSelect { margin-top: 2px; }
-[data-testid="stSidebar"] hr { margin: 12px 0 !important; opacity: 0.3; }
-
-/* ── 深色模式适配 ── */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-main:#0F1117; --bg-sidebar:#1A1D27; --bg-card:#1E2130;
-    --bg-card-hover:#252840; --border-color:#2D3148;
-    --text-primary:#F0F2F8; --text-second:#C5CBD8;
-    --text-muted:#8B93A8; --text-faint:#5A6178;
-    --shadow:0 2px 12px rgba(0,0,0,0.3);
-  }
-}
-[data-theme="dark"] {
-  --bg-main:#0F1117; --bg-sidebar:#1A1D27; --bg-card:#1E2130;
-  --bg-card-hover:#252840; --border-color:#2D3148;
-  --text-primary:#F0F2F8; --text-second:#C5CBD8;
-  --text-muted:#8B93A8; --text-faint:#5A6178;
-}
-[data-theme="dark"] .diag-res { background:#0D2818 !important; }
-[data-theme="dark"] .diag-ctr { background:#2D1800 !important; }
-[data-theme="dark"] .diag-info { background:#0D1D3A !important; }
-[data-theme="dark"] .diag-warn { background:#2D2200 !important; }
-[data-theme="dark"] .diag b, [data-theme="dark"] .diag strong { color: var(--text-primary) !important; }
-[data-theme="dark"] .diag span { color: var(--text-second) !important; }
-[data-theme="dark"] .api-status.ready { background:#064E3B; color:#6EE7B7; }
-[data-theme="dark"] .api-status.error { background:#450A0A; color:#FCA5A5; }
-[data-theme="dark"] .api-status.warning { background:#451A03; color:#FCD34D; }
-[data-theme="dark"] .ing-row { background: var(--bg-card-hover) !important; }
-[data-theme="dark"] .chat-bubble-ai { background: var(--bg-card) !important; color: var(--text-primary) !important; }
-
-/* ── 欢迎卡片 ── */
-.welcome-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 20px; padding: 40px 48px; margin-bottom: 20px; box-shadow: var(--shadow); }
-.welcome-card h2 { color: var(--text-primary) !important; }
-.welcome-card p, .welcome-card li { color: var(--text-second) !important; }
-.step-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 16px 20px; flex: 1; min-width: 160px; }
-.step-card h4 { color: var(--text-primary) !important; margin: 6px 0 4px; }
-.step-card p { color: var(--text-muted) !important; font-size: .85rem; margin: 0; }
-
-/* ── hero 全宽（消除 column 产生的空白）── */
-.hero-header { width: 100%; box-sizing: border-box; }
-.block-container > div:first-child { padding: 0 !important; }
-
 #MainMenu, footer { visibility: hidden; }
-.block-container { padding-top: 1rem !important; }
+.block-container { padding-top: 1.2rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -557,8 +495,7 @@ def md_to_html(text):
 # ================================================================
 def render_chat_section(api_config, cn1, cn2, selected, ratios, sim):
     st.markdown("---")
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f'<h4>🤖 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2}</span></h4>', unsafe_allow_html=True)
+    st.markdown(f'<div class="card"><h4 class="card-title">🤖 风味虫洞顾问 <span style="font-size:.75rem;color:var(--text-muted);font-weight:400">· 基于 {cn1} × {cn2}</span></h4>', unsafe_allow_html=True)
     
     if not api_config:
         st.markdown("""
@@ -576,7 +513,7 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim):
         return
     
     provider = api_config.get("provider", "unknown")
-    provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude", "dashscope": "通义千问"}
+    provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude", "dashscope": "通义千问 ✨"}
     provider_name = provider_names.get(provider, provider.upper())
     
     st.markdown(f'<div class="api-status ready"><span>✅</span><span>AI 顾问已连接 · {provider_name}</span></div>', unsafe_allow_html=True)
@@ -721,77 +658,51 @@ def main():
         st.error("❌ 找不到 flavordb_data.csv")
         st.stop()
 
-    # Hero 独占整行，语言按钮内嵌于 hero 右侧
-    st.markdown("""
-    <div class="hero-header" style="justify-content:space-between;align-items:center">
-      <div style="display:flex;align-items:center;gap:14px">
-        <span style="font-size:2.2rem">🧬</span>
-        <div>
-          <p class="hero-title">味觉虫洞 · Flavor Lab</p>
-          <p class="hero-sub">Professional Flavor Pairing Engine · V2.0</p>
+    # Hero + 语言切换
+    col_hero, col_lang = st.columns([6, 1])
+    with col_hero:
+        st.markdown("""
+        <div class="hero-header">
+          <span style="font-size:2.2rem">🧬</span>
+          <div>
+            <p class="hero-title">味觉虫洞 · Flavor Lab</p>
+            <p class="hero-sub">Professional Flavor Pairing Engine · V2.0</p>
+          </div>
         </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    with col_lang:
+        if st.button("🌐 EN/中", key="lang_toggle"):
+            st.session_state.language = "en" if st.session_state.language == "zh" else "zh"
+            st.rerun()
 
     # 侧边栏
     with st.sidebar:
         st.markdown("### 🔬 实验参数")
 
-        # ── Vegan 模式（默认开启）──
-        ANIMAL_KEYWORDS = ["meat","dairy","fish","seafood","pork","beef","chicken","egg"]
-        ANIMAL_CATS_EN = {"Meat","Dairy","Fish","Seafood","Egg","Beverage Alcoholic","Beverage Alcoholic Distilled"}
-        
-        is_vegan = st.toggle("🌿 仅植物基 Vegan", value=st.session_state.vegan_default_set, key="vegan_toggle")
-        st.session_state.vegan_default_set = is_vegan
-
-        # ── 分类筛选 pill 按钮 ──
         all_cats = sorted(df["category"].unique().tolist())
-        st.markdown('<div class="sec-label">🗂 按分类筛选（多选）</div>', unsafe_allow_html=True)
-
-        # 生成 pill HTML，Vegan模式下动物类显示但置灰禁用
-        pill_html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">'
-        for cat in all_cats:
+        st.markdown('<div class="sec-label">🗂 按分类筛选</div>', unsafe_allow_html=True)
+        
+        cat_cols = st.columns(3)
+        for i, cat in enumerate(all_cats[:12]):
             cat_zh = t_category(cat)
             is_active = cat in st.session_state.selected_cats
-            is_animal = any(kw in cat.lower() for kw in ANIMAL_KEYWORDS) or cat in ANIMAL_CATS_EN
-            disabled = is_vegan and is_animal
-            if disabled:
-                pill_html += (f'<span style="display:inline-block;padding:4px 10px;border-radius:20px;' +
-                    f'background:#F3F4F6;color:#9CA3AF;font-size:.75rem;border:1px solid #E5E7EB;' +
-                    f'cursor:not-allowed;opacity:0.5" title="Vegan模式下不可选">{cat_zh}</span>')
-            elif is_active:
-                pill_html += (f'<span onclick="void(0)" style="display:inline-block;padding:4px 10px;border-radius:20px;' +
-                    f'background:linear-gradient(135deg,#7B2FF7,#00D2FF);color:#fff;' +
-                    f'font-size:.75rem;font-weight:700;border:1px solid transparent;cursor:pointer">{cat_zh} ✕</span>')
-            else:
-                pill_html += (f'<span style="display:inline-block;padding:4px 10px;border-radius:20px;' +
-                    f'background:#F0FDF4;color:#16A34A;font-size:.75rem;border:1px solid #BBF7D0;cursor:pointer">{cat_zh}</span>')
-        pill_html += '</div>'
-        st.markdown(pill_html, unsafe_allow_html=True)
-
-        # 实际可交互的 multiselect（隐藏样式，用于状态管理）
-        available_cats = [c for c in all_cats if not (is_vegan and (any(kw in c.lower() for kw in ANIMAL_KEYWORDS) or c in ANIMAL_CATS_EN))]
-        # 清理已选中的动物类（Vegan开启时）
-        if is_vegan:
-            st.session_state.selected_cats = {c for c in st.session_state.selected_cats if c in available_cats}
+            btn_style = "primary" if is_active else "secondary"
+            if cat_cols[i % 3].button(cat_zh, key=f"cat_{cat}", use_container_width=True, type=btn_style):
+                if is_active:
+                    st.session_state.selected_cats.discard(cat)
+                else:
+                    st.session_state.selected_cats.add(cat)
+                st.rerun()
         
-        selected_cats_list = st.multiselect(
-            "选择分类", options=available_cats,
-            default=list(st.session_state.selected_cats),
-            format_func=t_category,
-            label_visibility="collapsed", key="cat_multiselect"
-        )
-        st.session_state.selected_cats = set(selected_cats_list)
-
         if st.session_state.selected_cats:
             df_show = df[df["category"].isin(st.session_state.selected_cats)]
         else:
             df_show = df
 
+        is_vegan = st.toggle("🍃 仅植物基 Vegan", value=False)
         if is_vegan:
-            df_show = df_show[~df_show["category"].str.lower().apply(
-                lambda c: any(kw in c for kw in ANIMAL_KEYWORDS))]
+            excl = ["meat","dairy","fish","seafood","pork","beef","chicken","egg"]
+            df_show = df_show[~df_show["category"].str.lower().apply(lambda c: any(kw in c for kw in excl))]
 
         st.markdown('<div class="sec-label">🔍 搜索食材</div>', unsafe_allow_html=True)
         search_query = st.text_input("输入名称搜索...", key="search_box", label_visibility="collapsed")
@@ -814,9 +725,18 @@ def main():
         ratios = {}
         if len(selected) >= 2:
             st.markdown('<div class="sec-label">⚖️ 配方比例</div>', unsafe_allow_html=True)
+            st.markdown("""
+            <div style="background:#F0F4FF;border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:.78rem;line-height:1.65;color:#374151;border-left:3px solid #7B2FF7">
+            <b style="color:#7B2FF7">💡 比例设计思路</b><br>
+            · <b>主风味（≥50%）</b>：设定菜式的记忆点与核心香气基调<br>
+            · <b>副风味（25-40%）</b>：丰富层次，与主风味形成对话<br>
+            · <b>提味（≤15%）</b>：点睛之笔，提升整体香气频率<br>
+            拖动滑块后，右侧雷达图将<b>实时反映</b>各食材权重变化
+            </div>""", unsafe_allow_html=True)
             raw_total = 0
             for name in selected:
-                ratios[name] = st.slider(t_ingredient(name), 0, 100, 100//len(selected), 5, key=f"r_{name}")
+                pct_now = int(100//len(selected))
+                ratios[name] = st.slider(t_ingredient(name), 0, 100, pct_now, 5, key=f"r_{name}")
                 raw_total += ratios[name]
             if raw_total > 0:
                 ratios = {k: v/raw_total for k, v in ratios.items()}
@@ -828,7 +748,7 @@ def main():
         
         if api_ok:
             provider = api_config.get("provider", "unknown")
-            provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude", "dashscope": "通义千问"}
+            provider_names = {"openai": "OpenAI", "gemini": "Gemini", "claude": "Claude", "dashscope": "通义千问 ✨"}
             st.markdown(f'<div class="api-status ready"><span>✅</span><span>已连接 · {provider_names.get(provider, provider.upper())}</span></div>', unsafe_allow_html=True)
         elif api_config:
             st.markdown('<div class="api-status warning"><span>⚠️</span><span>配置异常，请检查 Key</span></div>', unsafe_allow_html=True)
@@ -878,8 +798,7 @@ def main():
     col_left, col_right = st.columns([1.35, 1], gap="large")
 
     with col_left:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("<h4>🔭 风味维度雷达图</h4>", unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4 class="card-title">🔭 风味维度雷达图</h4>', unsafe_allow_html=True)
         palette = [("#00D2FF","rgba(0,210,255,0.15)"),("#7B2FF7","rgba(123,47,247,0.15)"),
                    ("#FF6B6B","rgba(255,107,107,0.15)"),("#00E676","rgba(0,230,118,0.15)")]
         fig_radar = go.Figure()
@@ -902,8 +821,7 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
         if sim["shared"]:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("<h4>🕸 分子连线网络图</h4>", unsafe_allow_html=True)
+            st.markdown('<div class="card"><h4 class="card-title">🕸 分子连线网络图</h4>', unsafe_allow_html=True)
             shared_top = sim["shared"][:14]
             nx_l,ny_l,ntxt,nclr,nsz,ex,ey = [],[],[],[],[],[],[]
             nx_l+= [-1.6,1.6]; ny_l+=[0,0]
@@ -935,17 +853,45 @@ def main():
         }
         tlabel,tbadge,tdesc = type_info[sim["type"]]
         r1 = int(ratios.get(n1,0.5)*100); r2 = int(ratios.get(n2,0.5)*100)
+        jpct = int(sim["jaccard"]*100)
+        # 进度条颜色：红→橙→绿 渐变
+        bar_color = "#22C55E" if sc >= 70 else ("#F97316" if sc >= 45 else "#EF4444")
         st.markdown(f"""
-        <div class="card-dark">
-          <div style="color:rgba(255,255,255,.5);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px">分子共鸣指数</div>
-          <span class="score-big" style="color:{sc_c}">{sc}<span style="font-size:2rem;font-weight:400">%</span></span>
-          <div style="margin:12px 0"><span class="badge {tbadge}">{tlabel}</span></div>
-          <div style="color:rgba(255,255,255,.65);font-size:.82rem">{tdesc}</div>
-          <div style="margin-top:12px;color:rgba(255,255,255,.4);font-size:.78rem">{cn1} {r1}% · {cn2} {r2}%</div>
+        <div class="card-dark" style="text-align:left;padding:24px 28px">
+          <!-- 标签行 -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <div style="color:rgba(255,255,255,.5);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase">
+              🔬 分子共鸣指数
+            </div>
+            <span class="badge {tbadge}" style="font-size:.75rem">{tlabel}</span>
+          </div>
+          <!-- 核心数字 -->
+          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:12px">
+            <span style="font-size:4.5rem;font-weight:900;line-height:1;color:{sc_c};font-variant-numeric:tabular-nums">{sc}</span>
+            <span style="font-size:1.6rem;font-weight:400;color:rgba(255,255,255,.5)">%</span>
+          </div>
+          <!-- 进度条 -->
+          <div style="background:rgba(255,255,255,.12);border-radius:6px;height:6px;margin-bottom:16px;overflow:hidden">
+            <div style="width:{sc}%;height:100%;background:linear-gradient(90deg,{bar_color},{sc_c});border-radius:6px;transition:width .6s ease"></div>
+          </div>
+          <!-- 描述 -->
+          <div style="color:rgba(255,255,255,.75);font-size:.85rem;line-height:1.6;margin-bottom:14px">{tdesc}</div>
+          <!-- 比例行 -->
+          <div style="color:rgba(255,255,255,.4);font-size:.75rem;border-top:1px solid rgba(255,255,255,.1);padding-top:10px">
+            {cn1} <b style="color:rgba(255,255,255,.7)">{r1}%</b> &nbsp;·&nbsp; {cn2} <b style="color:rgba(255,255,255,.7)">{r2}%</b>
+          </div>
+          <!-- 科普说明 -->
+          <div style="margin-top:14px;background:rgba(255,255,255,.06);border-radius:10px;padding:12px 14px;font-size:.76rem;line-height:1.7;color:rgba(255,255,255,.5)">
+            <b style="color:rgba(255,255,255,.7)">📐 计算原理</b><br>
+            基于 <b style="color:rgba(255,255,255,.65)">Jaccard 相似系数</b>：两种食材共享芳香分子数 ÷ 两者分子总量。
+            共享分子 <b style="color:{sc_c}">{len(sim["shared"])} 种</b>，原始 Jaccard {jpct}%，
+            经感知权重校正后得出综合共鸣指数。
+            <br><span style="color:rgba(255,255,255,.35)">
+            &gt; 70% 同源共振 · 45-70% 平衡搭档 · &lt; 45% 对比碰撞</span>
+          </div>
         </div>""", unsafe_allow_html=True)
 
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("<h4>🧪 风味指纹</h4>", unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4 class="card-title">🧪 风味指纹</h4>', unsafe_allow_html=True)
         for i, name in enumerate(selected):
             cn = t_ingredient(name)
             notes_cn = t_notes_list(rows[name]["mol_set"], top_n=10)
@@ -962,8 +908,7 @@ def main():
             </div>""", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("<h4>🔬 深度诊断</h4>", unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4 class="card-title">🔬 深度诊断</h4>', unsafe_allow_html=True)
         jpct = int(sim["jaccard"]*100)
         
         if sim["type"] == "resonance":
@@ -1002,8 +947,7 @@ def main():
 
         pol = polarity_analysis(mol_sets[n1] | mol_sets[n2])
         if pol["total"] > 0:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("<h4>💧 介质推演</h4>", unsafe_allow_html=True)
+            st.markdown('<div class="card"><h4 class="card-title">💧 介质推演</h4>', unsafe_allow_html=True)
             lp = int(pol["lipo"]/pol["total"]*100); hp = 100-lp
             if pol["type"] == "lipophilic":
                 st.markdown(f"""<div class="diag diag-ctr">
@@ -1022,35 +966,50 @@ def main():
                 </div>""", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("<h4>👨‍🍳 主厨工艺建议</h4>", unsafe_allow_html=True)
+        st.markdown('<div class="card"><h4 class="card-title">👨‍🍳 主厨工艺建议</h4>', unsafe_allow_html=True)
         tips_pool = {
             "resonance": [
-                f"以 <b>{cn1}</b> 为基底，将 <b>{cn2}</b> {tech_tip('浓缩收汁')}后叠加，在同一芳香维度形成「风味放大」效果。",
-                f"两者共享的芳香分子建议通过 {tech_tip('低温慢煮')} 保留，避免高温氧化破坏共鸣节点。",
-                f"考虑将 <b>{cn2}</b> 制成 {tech_tip('凝胶化')}，穿插在 <b>{cn1}</b> 的质地层间，延长风味余韵。",
+                ("🔥 叠加放大", f"以 <b>{cn1}</b> 为基底，将 <b>{cn2}</b> {tech_tip('浓缩收汁')}后叠加，在同一芳香维度形成「风味放大」效果。"),
+                ("🌡️ 低温保留", f"共享分子建议通过 {tech_tip('低温慢煮')} 保留，避免高温氧化破坏共鸣节点。"),
+                ("🍮 质地穿插", f"将 <b>{cn2}</b> 制成 {tech_tip('凝胶化')}，穿插在 <b>{cn1}</b> 的质地层间，延长风味余韵。"),
             ],
             "contrast": [
-                f"利用 <b>{cn2}</b> 的对比维度「切割」{cn1} 的厚重感，建议以提味剂形式在收尾阶段引入。",
-                f"对比型搭配分阶段引入：先以 <b>{cn1}</b> 建立底味，后期通过 {tech_tip('低温慢煮')} 的 <b>{cn2}</b> 制造味觉转折。",
-                f"将 <b>{cn2}</b> 做成 {tech_tip('Espuma')}，轻盈地覆盖 <b>{cn1}</b> 的厚重质地，创造对比张力。",
+                ("✂️ 切割平衡", f"利用 <b>{cn2}</b> 的对比维度「切割」{cn1} 的厚重感，以提味剂形式在收尾阶段引入。"),
+                ("📈 分阶引入", f"先以 <b>{cn1}</b> 建立底味，后期通过 {tech_tip('低温慢煮')} 的 <b>{cn2}</b> 制造味觉转折。"),
+                ("☁️ 泡沫覆盖", f"将 <b>{cn2}</b> 做成 {tech_tip('Espuma')}，轻盈覆盖 <b>{cn1}</b> 的厚重质地，创造对比张力。"),
             ],
             "neutral": [
-                f"比例递进策略：从 <b>{cn1}</b> 的纯净基调出发，逐步引入 <b>{cn2}</b> 的差异维度，通过 {tech_tip('乳化')} 融合。",
-                f"{tech_tip('真空萃取')} 让两者在分子层面充分融合，实现比例可控的风味协同。",
-                f"将 <b>{cn1}</b> 作为主味质地，<b>{cn2}</b> 通过 {tech_tip('冷冻干燥')} 制成粉末，提供风味跳跃感。",
+                ("📊 比例递进", f"从 <b>{cn1}</b> 的纯净基调出发，逐步引入 <b>{cn2}</b> 的差异维度，通过 {tech_tip('乳化')} 融合。"),
+                ("🔬 分子融合", f"{tech_tip('真空萃取')} 让两者在分子层面充分融合，实现比例可控的风味协同。"),
+                ("❄️ 粉末跳跃", f"以 <b>{cn1}</b> 为主味质地，<b>{cn2}</b> 通过 {tech_tip('冷冻干燥')} 制成粉末，提供风味跳跃感。"),
             ],
         }
-        tip = random.choice(tips_pool[sim["type"]])
-        st.markdown(f'<div class="diag diag-info" style="margin-bottom:10px">💡 {tip}</div>', unsafe_allow_html=True)
+        all_tips = tips_pool[sim["type"]]
+        type_guide = {
+            "resonance": "同源共振型 · 核心策略：叠加放大——强化共同分子，深化香气维度",
+            "contrast":  "对比碰撞型 · 核心策略：分阶切割——利用差异制造味觉节奏与层次感",
+            "neutral":   "平衡搭档型 · 核心策略：比例调控——通过权重微调寻找最佳共鸣平衡点",
+        }
+        tip_colors   = ["#EEF6FF", "#F0FDF4", "#FFF7ED"]
+        tip_borders  = ["#3B82F6", "#22C55E", "#F97316"]
+        st.markdown(f"""<div style="background:linear-gradient(135deg,#F0F4FF,#F5F0FF);border-radius:10px;
+        padding:12px 16px;margin-bottom:14px;border-left:4px solid #7B2FF7;font-size:.82rem;line-height:1.6">
+        <b style="color:#7B2FF7">🧭 策略方向</b>&emsp;{type_guide[sim["type"]]}</div>""", unsafe_allow_html=True)
+        tip_cols = st.columns(3)
+        for i, (label, tip_text) in enumerate(all_tips):
+            with tip_cols[i]:
+                st.markdown(f"""<div style="background:{tip_colors[i]};border:1px solid {tip_borders[i]}44;
+                border-top:3px solid {tip_borders[i]};border-radius:10px;padding:14px;min-height:140px">
+                <div style="font-size:.78rem;font-weight:700;color:{tip_borders[i]};margin-bottom:8px">{label}</div>
+                <div style="font-size:.79rem;color:#374151;line-height:1.65">{tip_text}</div>
+                </div>""", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
     cb, cc = st.columns([1,1], gap="large")
 
     with cb:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(f"<h4>🌉 风味桥接推荐</h4>", unsafe_allow_html=True)
+        st.markdown(f'<div class="card"><h4 class="card-title">🌉 风味桥接推荐</h4>', unsafe_allow_html=True)
         st.markdown(f"<p style='color:var(--text-muted);font-size:.82rem'>寻找能串联 <b>{cn1}</b> 与 <b>{cn2}</b> 的「第三食材」</p>", unsafe_allow_html=True)
         bridges = find_bridges(df, mol_sets[n1], mol_sets[n2], selected)
         if bridges:
@@ -1071,8 +1030,7 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with cc:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(f"<h4>⚡ 对比风味推荐</h4>", unsafe_allow_html=True)
+        st.markdown(f'<div class="card"><h4 class="card-title">⚡ 对比风味推荐</h4>', unsafe_allow_html=True)
         st.markdown(f"<p style='color:var(--text-muted);font-size:.82rem'>与 <b>{cn1}</b> × <b>{cn2}</b> 形成张力对比的食材</p>", unsafe_allow_html=True)
         contrasts = find_contrasts(df, mol_sets[n1], mol_sets[n2], selected)
         if contrasts:
