@@ -807,8 +807,23 @@ def render_experiment_tab(df):
                     unsafe_allow_html=True)
 
     options = sorted(df_show["name"].unique().tolist())
-    defaults = st.session_state.pop("random_selection", None) or \
-               [n for n in ["Coffee", "Strawberry"] if n in options] or options[:2]
+    options_set = set(options)
+
+    # ⚠️ 关键修复：确保 default 里的每一项都在当前 options 中
+    # 场景：用户切换分类筛选后，之前选中的食材可能已不在新的 options 里
+    random_sel = st.session_state.pop("random_selection", None)
+    if random_sel:
+        # 随机选择：过滤掉不在当前options中的项
+        defaults = [n for n in random_sel if n in options_set]
+    else:
+        # 优先使用 session_state 中已选的（过滤掉不在options中的）
+        prev = st.session_state.get("ing_select", [])
+        defaults = [n for n in prev if n in options_set]
+
+    # 如果过滤后不足2个，用备选兜底
+    if len(defaults) < 2:
+        fallback = [n for n in ["Coffee", "Strawberry"] if n in options_set]
+        defaults = fallback if len(fallback) >= 2 else options[:2]
 
     selected = st.multiselect(
         "选择食材（2-4种）", options=options, default=defaults,
