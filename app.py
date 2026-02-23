@@ -41,7 +41,7 @@ def t(text_en, text_zh=None):
 # 1. API 配置管理 —— 全面统一为阿里云千问(DashScope)
 # ================================================================
 DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL   = "qwen-plus"
+DEFAULT_MODEL   = "qwen-turbo"   # turbo 响应速度比 plus 快 3-5 倍
 
 def get_api_config():
     """
@@ -97,26 +97,19 @@ def check_api_status():
 # ================================================================
 # 2. AI 调用引擎 —— 统一 OpenAI 兼容接口调用千问
 # ================================================================
-FLAVOR_GEM_PROMPT = """你是「风味虫洞顾问」，一位顶级的分子美食科学家与风味设计专家。
-你运营着《味觉虫洞 Flavor Lab》，基于食材分子结构、味觉互补和嗅觉穿透力提供创意风味方案。
-
-【核心逻辑框架】
-- 锚点法则：以用户食材为核心寻找「虫洞连接」
-- 分子共鸣：寻找共享香气分子
-- 维度补偿：酸甜苦咸鲜辛麻涩的动态平衡
-- 极光效应：关注提升香气频率、产生鼻腔冲击力的组合
+FLAVOR_GEM_PROMPT = """你是「风味虫洞顾问」，分子美食科学家。基于食材分子结构、味觉互补提供创意风味方案。
 
 【当前实验数据】
 {context}
 
-【回复格式（必须包含）】
-🛰️ 虫洞坐标：食材的味觉坐标
-🌀 关联逻辑：搭配原理（分子共鸣/味觉补偿/嗅觉电梯效应）
-🧪 实验报告：入口→中段→尾韵的感官演变曲线
-👨‍🍳 厨师应用：2-3个具体烹饪/研发场景
-📊 风味星图：建议配比或关键技术处理
+【回复结构（简洁有力，每项2-3句）】
+🛰️ 虫洞坐标：两种食材的味觉维度定位
+🌀 关联逻辑：分子共鸣或对比碰撞的核心原理
+🧪 实验报告：入口→中段→尾韵三段感官曲线
+👨‍🍳 厨师应用：2个具体烹饪场景
+📊 风味星图：最优比例或关键处理技法
 
-【语气】专业前卫、充满探索感。对中国本土食材有深厚理解。每次结尾提出一个前沿延伸问题。"""
+语气专业前卫。结尾提一个延伸探索问题。中文回答，控制在400字内。"""
 
 def call_ai_api(messages, context, max_retries=2):
     """
@@ -154,7 +147,7 @@ def call_ai_api(messages, context, max_retries=2):
                 model=config.get("model", DEFAULT_MODEL),
                 messages=api_messages,
                 temperature=0.75,
-                max_tokens=1500  # 适当减少token节约响应时间
+                max_tokens=800   # 控制回复长度，turbo+800token约3-5秒响应
             )
             return True, response.choices[0].message.content, False
         except Exception as e:
@@ -1101,65 +1094,116 @@ DASHSCOPE_MODEL = "qwen-plus"
 
 def render_empty_state(df):
     st.markdown("""
-    <div class="card" style="text-align:center;padding:40px 30px">
-      <div style="font-size:3.5rem;margin-bottom:16px">🧬</div>
-      <h2 style="margin-bottom:12px;font-size:1.5rem">味觉虫洞 · Flavor Lab</h2>
-      <p style="color:var(--text-muted);font-size:1rem;line-height:1.7;max-width:500px;margin:0 auto 24px">
-        基于 FlavorDB 分子数据库的专业食材搭配引擎，<br>结合通义千问 AI 提供专业风味顾问服务
+    <div class="card" style="text-align:center;padding:36px 30px 28px">
+      <div style="font-size:3rem;margin-bottom:12px">🧬</div>
+      <h2 style="margin-bottom:8px;font-size:1.4rem;color:var(--text-primary)">味觉虫洞 · Flavor Lab</h2>
+      <p style="color:var(--text-muted);font-size:.9rem;line-height:1.7;max-width:480px;margin:0 auto">
+        基于 FlavorDB 分子数据库，探索食材之间的「分子共鸣」
       </p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("<div class='card'><h4 class='card-title'>🚀 使用流程</h4>", unsafe_allow_html=True)
+    st.markdown("<div class='card'><h4 class='card-title'>🚀 三步开始实验</h4>", unsafe_allow_html=True)
     st.markdown("""
     <div class="onboarding-step">
       <div class="num">1</div>
-      <div class="text"><b>选择食材</b><br>在左侧「实验台」选择 2-4 种食材，或点「随机探索」快速开始</div>
+      <div class="text"><b>左侧实验台</b> 选择 2-4 种食材（或点下方示例快速开始）</div>
     </div>
     <div class="onboarding-step">
       <div class="num">2</div>
-      <div class="text"><b>查看分析</b><br>观察雷达图、分子共鸣指数和风味指纹分析</div>
+      <div class="text"><b>查看分析结果</b> 雷达图 · 分子共鸣指数 · 风味指纹 · 网络图</div>
     </div>
     <div class="onboarding-step">
       <div class="num">3</div>
-      <div class="text"><b>咨询 AI</b><br>在「设置」中填入 Key，向千问风味顾问提问，获取专业搭配建议</div>
+      <div class="text"><b>咨询 AI 顾问</b> 在「设置」中填入千问 Key，解锁专业风味建议</div>
     </div>
     """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # 热门实验
-    st.markdown("<div class='card'><h4 class='card-title'>🔥 热门风味实验</h4>", unsafe_allow_html=True)
-    hot_experiments = [
-        {"pair": ["Coffee", "Strawberry"], "desc": "咖啡的烘焙苦香与草莓的果酸甜美，共享焦糖与坚果调性"},
-        {"pair": ["dark chocolate", "Chili"], "desc": "黑巧克力可可苦甜与辣椒辛辣碰撞，Mole 酱的灵魂组合"},
-        {"pair": ["Tomato", "Strawberry"], "desc": "番茄鲜甜与草莓果香共享多种酯类分子，意想不到的和谐"},
-    ]
-    hot_cols = st.columns(3)
-    for i, exp in enumerate(hot_experiments):
-        ing1, ing2 = exp["pair"]
-        cn1, cn2 = t_ingredient(ing1), t_ingredient(ing2)
-        with hot_cols[i]:
-            st.markdown(f"""
-            <div class="hot-experiment-card">
-              <div style="font-size:1.05rem;font-weight:700;background:linear-gradient(90deg,#00D2FF,#7B2FF7);
-                -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px">
-                {cn1} × {cn2}
-              </div>
-              <div style="font-size:.78rem;color:#6B7280;line-height:1.5">{exp['desc']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("🚀 立即尝试", key=f"hot_exp_{i}", use_container_width=True):
-                available = df["name"].unique().tolist()
-                pair = [x for x in [ing1, ing2] if x in available]
-                if len(pair) >= 2:
-                    st.session_state.random_selection = pair
-                    st.session_state.sidebar_tab = "实验台"
-                    st.rerun()
-                else:
-                    st.warning("部分食材不在当前数据集中")
+    # 共鸣指数说明卡片
+    st.markdown("<div class='card'><h4 class='card-title'>🔬 读懂「分子共鸣指数」</h4>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:8px">
+      <div style="background:linear-gradient(135deg,#0d2818,#0a3020);border-left:4px solid #22C55E;border-radius:10px;padding:14px">
+        <div style="font-size:1.3rem;font-weight:900;color:#4ade80">73–97</div>
+        <div style="font-size:.78rem;color:#4ade80;font-weight:700;margin:3px 0 6px">🟢 同源共振</div>
+        <div style="font-size:.73rem;color:rgba(255,255,255,.6);line-height:1.55">
+          大量共享香气分子，组合后风味<b style="color:#4ade80">叠加放大</b>，余韵绵长。适合主从搭配，以一种强化另一种。
+          <br><br><i style="opacity:.65">例：咖啡 × 可可、草莓 × 覆盆子</i>
+        </div>
+      </div>
+      <div style="background:linear-gradient(135deg,#1a1f2e,#1e2438);border-left:4px solid #F97316;border-radius:10px;padding:14px">
+        <div style="font-size:1.3rem;font-weight:900;color:#fb923c">46–72</div>
+        <div style="font-size:.78rem;color:#fb923c;font-weight:700;margin:3px 0 6px">🟡 平衡搭档</div>
+        <div style="font-size:.73rem;color:rgba(255,255,255,.6);line-height:1.55">
+          有交叠也有差异，最容易创造<b style="color:#fb923c">「1+1>2」</b>的复合香气。比例调整空间大，是最丰富的创作区间。
+          <br><br><i style="opacity:.65">例：咖啡 × 草莓、番茄 × 罗勒</i>
+        </div>
+      </div>
+      <div style="background:linear-gradient(135deg,#2d0d0d,#1a0808);border-left:4px solid #EF4444;border-radius:10px;padding:14px">
+        <div style="font-size:1.3rem;font-weight:900;color:#f87171">18–45</div>
+        <div style="font-size:.78rem;color:#f87171;font-weight:700;margin:3px 0 6px">🔴 对比碰撞</div>
+        <div style="font-size:.73rem;color:rgba(255,255,255,.6);line-height:1.55">
+          分子差异显著，产生强烈<b style="color:#f87171">对比张力</b>。少量点缀可创造惊喜，高手用它制造「味觉转折」。
+          <br><br><i style="opacity:.65">例：黑巧克力 × 辣椒、蓝纹奶酪 × 蜂蜜</i>
+        </div>
+      </div>
+    </div>
+    <div style="font-size:.72rem;color:var(--text-faint);text-align:center;padding-top:4px">
+      💡 基于 Jaccard 相似系数 × 双向覆盖率 × 差异惩罚因子计算，真实反映分子重叠程度
+    </div>
+    """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown(f'<div style="text-align:center;padding:20px;color:var(--text-faint);font-size:.76rem">🧬 FlavorDB · {len(df)} 种食材 · 分子风味科学</div>', unsafe_allow_html=True)
 
+    # 两个示例卡片
+    st.markdown("<div class='card'><h4 class='card-title'>✨ 选择一个示例开始体验</h4>", unsafe_allow_html=True)
+    st.markdown('<p style="font-size:.82rem;color:var(--text-muted);margin-bottom:14px">两种截然不同的搭配逻辑——点击任意一个，立刻看到分子分析结果</p>', unsafe_allow_html=True)
+
+    available = set(df["name"].values)
+    col_res, col_ctr = st.columns(2, gap="large")
+
+    resonance_examples = [("Coffee","Cocoa"),("Strawberry","Raspberry"),("Lemon","Orange"),("Garlic","Onion")]
+    res_pair = next(((a,b) for a,b in resonance_examples if a in available and b in available), None)
+
+    with col_res:
+        if res_pair:
+            ra, rb = res_pair
+            cna, cnb = t_ingredient(ra), t_ingredient(rb)
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#0d2818,#0a2a18);border:1px solid #166534;
+              border-radius:14px;padding:20px;text-align:center;min-height:150px;margin-bottom:8px">
+              <div style="font-size:.7rem;color:#4ade80;font-weight:700;letter-spacing:.08em;margin-bottom:8px">🟢 同源共振示例</div>
+              <div style="font-size:1.4rem;font-weight:900;background:linear-gradient(90deg,#4ade80,#00D2FF);
+                -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px">{cna} × {cnb}</div>
+              <div style="font-size:.76rem;color:rgba(255,255,255,.55);line-height:1.5">共享大量香气分子，风味叠加增强<br>适合探索「主从」搭配关系</div>
+            </div>""", unsafe_allow_html=True)
+            if st.button(f"🟢 体验同源共振", key="demo_resonance", use_container_width=True):
+                st.session_state["random_selection"] = [ra, rb]
+                st.session_state.sidebar_tab = "实验台"
+                st.rerun()
+
+    contrast_examples = [("dark chocolate","Chili"),("Coffee","Orange"),("Garlic","Strawberry"),("Tomato","Vanilla")]
+    ctr_pair = next(((a,b) for a,b in contrast_examples if a in available and b in available), None)
+
+    with col_ctr:
+        if ctr_pair:
+            ca, cb = ctr_pair
+            cna2, cnb2 = t_ingredient(ca), t_ingredient(cb)
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#2d0d0d,#1a0808);border:1px solid #7f1d1d;
+              border-radius:14px;padding:20px;text-align:center;min-height:150px;margin-bottom:8px">
+              <div style="font-size:.7rem;color:#f87171;font-weight:700;letter-spacing:.08em;margin-bottom:8px">🔴 对比碰撞示例</div>
+              <div style="font-size:1.4rem;font-weight:900;background:linear-gradient(90deg,#f87171,#F97316);
+                -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px">{cna2} × {cnb2}</div>
+              <div style="font-size:.76rem;color:rgba(255,255,255,.55);line-height:1.5">分子差异显著，产生对比张力<br>适合探索「惊喜碰撞」逻辑</div>
+            </div>""", unsafe_allow_html=True)
+            if st.button(f"🔴 体验对比碰撞", key="demo_contrast", use_container_width=True):
+                st.session_state["random_selection"] = [ca, cb]
+                st.session_state.sidebar_tab = "实验台"
+                st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(f'<div style="text-align:center;padding:16px;color:var(--text-faint);font-size:.75rem">🧬 FlavorDB · {len(df)} 种食材 · 分子风味科学</div>', unsafe_allow_html=True)
 
 # ================================================================
 # 11. 主函数
@@ -1211,13 +1255,17 @@ def main():
             selected = render_experiment_tab(df)
             ratios = {}
         elif selected_tab == "配方台":
-            # 同步当前选中的食材
-            current_selected = st.session_state.get("ing_select", [])
-            if not current_selected:
-                opts = sorted(df["name"].unique().tolist())
-                current_selected = [n for n in ["Coffee", "Strawberry"] if n in opts] or opts[:2]
-            selected = current_selected
-            ratios = render_formula_tab(selected)
+            # 按优先级同步食材：加入实验的 > 实验台已选的 > 空（提示用户先选择）
+            current_selected = (
+                st.session_state.get("_pending_ingredient_list") or
+                st.session_state.get("ing_select") or
+                []
+            )
+            # 清除临时pending
+            if "_pending_ingredient_list" in st.session_state:
+                del st.session_state["_pending_ingredient_list"]
+            selected = [n for n in current_selected if n in df["name"].values]
+            ratios = render_formula_tab(selected) if len(selected) >= 2 else {}
         else:
             selected = st.session_state.get("ing_select", [])
             ratios = {}
