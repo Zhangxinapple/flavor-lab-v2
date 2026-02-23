@@ -132,17 +132,20 @@ def call_ai_api(messages, context, max_retries=2):
 
     try:
         import openai
+        import httpx
     except ImportError:
-        return False, "❌ 未安装 openai 包，请执行 `pip install openai`", False
+        return False, "❌ 未安装依赖包，请检查 requirements.txt", False
 
     system_prompt = FLAVOR_GEM_PROMPT.format(context=context)
     api_messages = [{"role": "system", "content": system_prompt}]
     for msg in messages:
         api_messages.append({"role": msg["role"], "content": msg["content"]})
 
+    # ⚠️ 问题2修复：设置30秒超时，防止永久卡住
     client = openai.OpenAI(
         api_key=config["api_key"],
-        base_url=config.get("base_url", DASHSCOPE_BASE)
+        base_url=config.get("base_url", DASHSCOPE_BASE),
+        timeout=httpx.Timeout(30.0, connect=10.0)
     )
 
     for attempt in range(max_retries):
@@ -151,7 +154,7 @@ def call_ai_api(messages, context, max_retries=2):
                 model=config.get("model", DEFAULT_MODEL),
                 messages=api_messages,
                 temperature=0.75,
-                max_tokens=1800
+                max_tokens=1500  # 适当减少token节约响应时间
             )
             return True, response.choices[0].message.content, False
         except Exception as e:
@@ -163,8 +166,10 @@ def call_ai_api(messages, context, max_retries=2):
                 return False, "⚠️ **请求频率超限**，请等待 30 秒后重试。", True
             elif "invalid api key" in err.lower() or "authentication" in err.lower() or "401" in err:
                 return False, "❌ **API Key 无效**，请在设置中重新输入正确的 Key。", False
-            elif "timeout" in err.lower() or "connection" in err.lower():
-                return False, "❌ **网络超时**，请检查网络连接后重试。", False
+            elif "timeout" in err.lower() or "timed out" in err.lower():
+                return False, "⏱️ **请求超时（30s）**，千问服务器响应慢，请稍后重试。", False
+            elif "connection" in err.lower():
+                return False, "❌ **网络连接失败**，请检查网络后重试。", False
             else:
                 return False, f"⚠️ 调用出错：{err[:200]}", False
 
@@ -461,14 +466,64 @@ POLARITY = {
 }
 
 def calc_sim(a, b):
+    """
+    重构版分子共鸣指数算法：
+    - 不再压缩到 50-97，让分数真实反映差异
+    - 三段式：低共鸣(20-45) / 中平衡(46-72) / 高共振(73-97)
+    - 引入"稀有分子加权"：共享分子少但独特时分数更低，鼓励探索多元搭配
+    """
+    if not a or not b:
+        return {"score": 0, "jaccard": 0, "shared": [], "only_a": [], "only_b": [], "type": "contrast",
+                "detail": {"shared_count": 0, "only_a_count": 0, "only_b_count": 0}}
+
     inter = a & b
     union = a | b
-    j = len(inter) / len(union) if union else 0
-    w = min(1.0, (len(inter) / max(len(a), len(b), 1)) * 1.5)
-    score = int(min(97, max(50, j * 250 + w * 120)))
-    typ = "resonance" if j >= 0.35 else ("contrast" if j < 0.12 else "neutral")
-    return {"score": score, "jaccard": j, "shared": sorted(inter),
-            "only_a": sorted(a - b), "only_b": sorted(b - a), "type": typ}
+    only_a = a - b
+    only_b = b - a
+
+    j = len(inter) / len(union)  # Jaccard 0~1
+
+    # 覆盖率：共享分子占各自总量的比例（取较小值，防止小集合虚高）
+    cov_a = len(inter) / max(len(a), 1)
+    cov_b = len(inter) / max(len(b), 1)
+    coverage = min(cov_a, cov_b)  # 0~1，严格要求双向覆盖
+
+    # 差异度：两者独有分子的平均比例
+    div_a = len(only_a) / max(len(a), 1)
+    div_b = len(only_b) / max(len(b), 1)
+    diversity = (div_a + div_b) / 2  # 0~1
+
+    # 综合得分：共鸣权重60% + 覆盖权重40%，再根据差异度调整
+    # 纯 Jaccard 容易虚高，加入 coverage 的强约束
+    raw = (j * 0.6 + coverage * 0.4) * 100
+
+    # 差异惩罚：差异度越大，得分越低（鼓励找真正的共鸣而非偶然重叠）
+    penalty = diversity * 15
+    score = int(min(97, max(18, raw - penalty + len(inter) * 0.3)))
+
+    # 类型判定（基于 Jaccard，阈值合理化）
+    if j >= 0.30:
+        typ = "resonance"
+    elif j >= 0.10:
+        typ = "neutral"
+    else:
+        typ = "contrast"
+
+    return {
+        "score": score,
+        "jaccard": j,
+        "shared": sorted(inter),
+        "only_a": sorted(only_a),
+        "only_b": sorted(only_b),
+        "type": typ,
+        "detail": {
+            "shared_count": len(inter),
+            "only_a_count": len(only_a),
+            "only_b_count": len(only_b),
+            "coverage_a": round(cov_a * 100),
+            "coverage_b": round(cov_b * 100),
+        }
+    }
 
 def polarity_analysis(mol_set):
     lipo = sum(1 for m in mol_set if POLARITY.get(m) == "L")
@@ -522,10 +577,34 @@ RADAR_DIMS = {
 }
 
 def radar_vals(mol_set):
+    """
+    重构版雷达图算法：
+    - 每个维度最多匹配关键词数量不同，需要归一化
+    - 引入分级：1-2个关键词=基础(3-4分)，3-4个=中等(5-7分)，5+个=强烈(8-10分)
+    - 避免只要有匹配就接近满分的问题
+    """
     result = {}
     for dim, kws in RADAR_DIMS.items():
         hit = sum(1 for k in kws if k in mol_set)
-        result[dim] = min(10, hit * 2.0 + (0.8 if hit > 0 else 0))
+        max_kws = len(kws)
+
+        if hit == 0:
+            val = 0.0
+        elif hit == 1:
+            # 仅1个关键词匹配：微弱存在感
+            val = 2.5 + random.uniform(-0.3, 0.3)
+        elif hit == 2:
+            # 2个：有该维度特征
+            val = 4.5 + random.uniform(-0.5, 0.5)
+        elif hit <= 4:
+            # 3-4个：明显特征
+            val = 5.5 + (hit - 2) * 1.0 + random.uniform(-0.3, 0.3)
+        else:
+            # 5+个：强烈特征，但要根据该维度总词数归一化
+            ratio = hit / max_kws
+            val = 7.0 + ratio * 3.0
+
+        result[dim] = round(min(10.0, max(0.0, val)), 1)
     return result
 
 # ================================================================
@@ -824,6 +903,14 @@ def render_sidebar_tabs(df):
     if selected_tab != st.session_state.sidebar_tab:
         st.session_state.sidebar_tab = selected_tab
         st.rerun()
+
+    # 问题4：标签使用引导
+    tab_guides = {
+        "实验台": "🧪 **实验台** — 选择 2-4 种食材，右侧实时呈现分子共鸣分析、雷达图和 AI 顾问",
+        "配方台": "⚖️ **配方台** — 拖动滑块调整各食材比例，雷达图面积随比例实时变化",
+        "设置":   "🔑 **设置** — 填入千问 API Key 以启用 AI 风味顾问对话功能",
+    }
+    st.caption(tab_guides[selected_tab])
     st.markdown("---")
     return selected_tab
 
@@ -866,10 +953,15 @@ def render_experiment_tab(df):
 
     col_random, col_count = st.columns([1, 2])
     with col_random:
+        # 问题3修复：随机探索只设置 random_selection，不赋值 widget key
         if st.button("🎲 随机探索", key="random_explore", use_container_width=True):
             opts = sorted(df_show["name"].unique().tolist())
             if len(opts) >= 2:
-                st.session_state.random_selection = random.sample(opts, 2)
+                picked = random.sample(opts, 2)
+                st.session_state["random_selection"] = picked
+                # 清除可能影响默认值的旧状态
+                if "_pending_ingredient_list" in st.session_state:
+                    del st.session_state["_pending_ingredient_list"]
                 st.rerun()
     with col_count:
         st.markdown(f'<div style="text-align:right;font-size:.82rem;color:var(--text-muted);padding-top:8px">{len(df_show)} 种食材</div>',
@@ -878,18 +970,18 @@ def render_experiment_tab(df):
     options = sorted(df_show["name"].unique().tolist())
     options_set = set(options)
 
-    # ⚠️ 关键修复：确保 default 里的每一项都在当前 options 中
-    # 场景：用户切换分类筛选后，之前选中的食材可能已不在新的 options 里
+    # 优先级：随机探索 > 加入实验 > 上次选择 > 兜底
     random_sel = st.session_state.pop("random_selection", None)
+    pending_add = st.session_state.pop("_pending_ingredient_list", None)
+
     if random_sel:
-        # 随机选择：过滤掉不在当前options中的项
         defaults = [n for n in random_sel if n in options_set]
+    elif pending_add:
+        defaults = [n for n in pending_add if n in options_set]
     else:
-        # 优先使用 session_state 中已选的（过滤掉不在options中的）
         prev = st.session_state.get("ing_select", [])
         defaults = [n for n in prev if n in options_set]
 
-    # 如果过滤后不足2个，用备选兜底
     if len(defaults) < 2:
         fallback = [n for n in ["Coffee", "Strawberry"] if n in options_set]
         defaults = fallback if len(fallback) >= 2 else options[:2]
@@ -1078,6 +1170,15 @@ def main():
         st.error("❌ 找不到 flavordb_data.csv，请确保数据文件在同一目录下")
         st.stop()
 
+    # ⚠️ 问题1修复：在渲染任何widget之前，先处理"加入实验"的食材更新
+    # 不能在widget渲染循环中直接赋值widget的key，必须在rerun后、widget创建前处理
+    if "_add_ingredient" in st.session_state:
+        new_list = st.session_state.pop("_add_ingredient")
+        st.session_state["_pending_ingredient_list"] = new_list
+    if "_add_warn" in st.session_state:
+        del st.session_state["_add_warn"]
+        st.toast("⚠️ 最多支持4种食材", icon="⚠️")
+
     # Hero
     _, btn_col = st.columns([9, 1])
     with btn_col:
@@ -1162,10 +1263,17 @@ def main():
             ))
         fig_radar.update_layout(
             polar=dict(bgcolor="rgba(248,249,255,0.4)",
-                       radialaxis=dict(visible=True, range=[0,10], tickfont=dict(size=9, color="#6B7280")),
+                       radialaxis=dict(
+                           visible=True, range=[0,10],
+                           tickvals=[2, 4, 6, 8, 10],
+                           ticktext=["2", "4", "6", "8", "10"],
+                           tickfont=dict(size=9, color="#6B7280"),
+                           gridcolor="rgba(107,114,128,0.2)",
+                           linecolor="rgba(107,114,128,0.2)"
+                       ),
                        angularaxis=dict(tickfont=dict(size=12, color="#6B7280"))),
-            showlegend=True, legend=dict(orientation="h", y=-0.15, font=dict(size=11, color="#6B7280")),
-            height=420, margin=dict(t=20, b=70, l=40, r=40), paper_bgcolor="rgba(0,0,0,0)"
+            showlegend=True, legend=dict(orientation="h", y=-0.18, font=dict(size=11, color="#6B7280")),
+            height=420, margin=dict(t=20, b=80, l=40, r=40), paper_bgcolor="rgba(0,0,0,0)"
         )
         st.plotly_chart(fig_radar, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1173,6 +1281,7 @@ def main():
     with r1_right:
         sc = sim["score"]
         sc_c = score_color(sc)
+        detail = sim.get("detail", {})
         type_info = {
             "resonance": ("同源共振", "badge-resonance", "共享大量芳香分子，协同延长风味余韵"),
             "contrast":  ("对比碰撞", "badge-contrast", "差异显著，形成张力对比切割"),
@@ -1181,28 +1290,63 @@ def main():
         tlabel, tbadge, tdesc = type_info[sim["type"]]
         rr1 = int(ratios.get(n1, 0.5)*100); rr2 = int(ratios.get(n2, 0.5)*100)
         jpct = int(sim["jaccard"]*100)
-        bar_color = "#22C55E" if sc >= 70 else ("#F97316" if sc >= 45 else "#EF4444")
+        bar_color = "#22C55E" if sc >= 73 else ("#F97316" if sc >= 46 else "#EF4444")
+        cov_a = detail.get("coverage_a", 0)
+        cov_b = detail.get("coverage_b", 0)
+        n_shared = detail.get("shared_count", len(sim["shared"]))
+        n_only_a = detail.get("only_a_count", len(sim["only_a"]))
+        n_only_b = detail.get("only_b_count", len(sim["only_b"]))
+
+        # 得分段位说明
+        if sc >= 73:
+            tier_text = "🟢 高度共振区（73-97）"
+            tier_guide = f"两者分子高度重叠，组合后香气叠加增强，适合主从搭配关系"
+        elif sc >= 46:
+            tier_text = "🟡 平衡搭档区（46-72）"
+            tier_guide = f"有交叠有差异，层次丰富，最容易创造「1+1>2」的复合香气"
+        else:
+            tier_text = "🔴 对比碰撞区（18-45）"
+            tier_guide = f"分子差异显著，形成强烈对比张力，适合少量点缀而非主体融合"
+
         st.markdown(f"""
         <div class="card-dark" style="text-align:left;padding:22px 26px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
             <div style="color:rgba(255,255,255,.5);font-size:.68rem;letter-spacing:.12em;text-transform:uppercase">🔬 分子共鸣指数</div>
             <span class="badge {tbadge}" style="font-size:.72rem">{tlabel}</span>
           </div>
-          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:10px">
+          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px">
             <span style="font-size:4rem;font-weight:900;line-height:1;color:{sc_c}">{sc}</span>
-            <span style="font-size:1.4rem;color:rgba(255,255,255,.45)">%</span>
+            <span style="font-size:1.4rem;color:rgba(255,255,255,.45)">/ 97</span>
           </div>
-          <div style="background:rgba(255,255,255,.12);border-radius:6px;height:5px;margin-bottom:12px;overflow:hidden">
-            <div style="width:{sc}%;height:100%;background:linear-gradient(90deg,{bar_color},{sc_c});border-radius:6px"></div>
+          <div style="font-size:.72rem;color:{sc_c};font-weight:700;margin-bottom:8px">{tier_text}</div>
+          <div style="background:rgba(255,255,255,.12);border-radius:6px;height:6px;margin-bottom:10px;overflow:hidden;position:relative">
+            <div style="position:absolute;left:0;top:0;height:100%;width:100%;display:flex">
+              <div style="width:28%;border-right:1px solid rgba(255,255,255,.15)"></div>
+              <div style="width:28%;border-right:1px solid rgba(255,255,255,.15)"></div>
+            </div>
+            <div style="width:{sc}%;height:100%;background:linear-gradient(90deg,{bar_color},{sc_c});border-radius:6px;position:relative;z-index:1"></div>
           </div>
-          <div style="color:rgba(255,255,255,.7);font-size:.82rem;line-height:1.55;margin-bottom:12px">{tdesc}</div>
-          <div style="color:rgba(255,255,255,.38);font-size:.72rem;border-top:1px solid rgba(255,255,255,.1);padding-top:8px">
-            {cn1} <b style="color:rgba(255,255,255,.65)">{rr1}%</b> &nbsp;·&nbsp; {cn2} <b style="color:rgba(255,255,255,.65)">{rr2}%</b>
+          <div style="display:flex;justify-content:space-between;font-size:.65rem;color:rgba(255,255,255,.28);margin-bottom:10px">
+            <span>对比 0</span><span>平衡 46</span><span>共振 73</span><span>97</span>
           </div>
-          <div style="margin-top:12px;background:rgba(255,255,255,.05);border-radius:8px;padding:10px 12px;font-size:.73rem;line-height:1.65;color:rgba(255,255,255,.45)">
-            <b style="color:rgba(255,255,255,.65)">📐 计算原理</b><br>
-            Jaccard 相似系数：共享芳香分子数 ÷ 两者分子总量。共享 <b style="color:{sc_c}">{len(sim["shared"])} 种</b>，Jaccard {jpct}%，经感知权重校正得综合共鸣指数。<br>
-            <span style="color:rgba(255,255,255,.28)">&gt;70% 同源共振 · 45-70% 平衡搭档 · &lt;45% 对比碰撞</span>
+          <div style="color:rgba(255,255,255,.65);font-size:.8rem;line-height:1.6;margin-bottom:12px;padding:8px 10px;background:rgba(255,255,255,.05);border-radius:8px">{tier_guide}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px">
+            <div style="text-align:center;background:rgba(0,210,255,.1);border-radius:8px;padding:8px">
+              <div style="font-size:1.4rem;font-weight:900;color:#00D2FF">{n_shared}</div>
+              <div style="font-size:.65rem;color:rgba(255,255,255,.45)">共享分子</div>
+            </div>
+            <div style="text-align:center;background:rgba(123,47,247,.1);border-radius:8px;padding:8px">
+              <div style="font-size:1.4rem;font-weight:900;color:#a78bfa">{n_only_a}</div>
+              <div style="font-size:.65rem;color:rgba(255,255,255,.45)">{cn1}独有</div>
+            </div>
+            <div style="text-align:center;background:rgba(255,107,107,.1);border-radius:8px;padding:8px">
+              <div style="font-size:1.4rem;font-weight:900;color:#FF6B6B">{n_only_b}</div>
+              <div style="font-size:.65rem;color:rgba(255,255,255,.45)">{cn2}独有</div>
+            </div>
+          </div>
+          <div style="color:rgba(255,255,255,.38);font-size:.7rem;border-top:1px solid rgba(255,255,255,.08);padding-top:8px;line-height:1.7">
+            <b style="color:rgba(255,255,255,.55)">📐 算法</b>：Jaccard {jpct}% × 双向覆盖率（{cn1}覆盖 {cov_a}% · {cn2}覆盖 {cov_b}%）× 差异惩罚<br>
+            比例：{cn1} <b style="color:rgba(255,255,255,.65)">{rr1}%</b> &nbsp;·&nbsp; {cn2} <b style="color:rgba(255,255,255,.65)">{rr2}%</b>
           </div>
         </div>""", unsafe_allow_html=True)
 
@@ -1382,11 +1526,12 @@ def main():
                     curr = list(st.session_state.get("ing_select", []))
                     if bname not in curr and len(curr) < 4:
                         curr.append(bname)
-                        st.session_state.ing_select = curr
-                        st.success(f"✅ 已添加 {bcn}")
+                        # ⚠️ 不直接赋值 ing_select（widget key），改用中间变量
+                        st.session_state["_add_ingredient"] = curr
                         st.rerun()
                     elif len(curr) >= 4:
-                        st.warning("⚠️ 最多支持4种食材")
+                        st.session_state["_add_warn"] = "max"
+                        st.rerun()
         else:
             st.info("未找到合适的桥接食材")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1413,11 +1558,11 @@ def main():
                     curr = list(st.session_state.get("ing_select", []))
                     if cname not in curr and len(curr) < 4:
                         curr.append(cname)
-                        st.session_state.ing_select = curr
-                        st.success(f"✅ 已添加 {ccn}")
+                        st.session_state["_add_ingredient"] = curr
                         st.rerun()
                     elif len(curr) >= 4:
-                        st.warning("⚠️ 最多支持4种食材")
+                        st.session_state["_add_warn"] = "max"
+                        st.rerun()
         else:
             st.info("未找到合适的对比食材")
         st.markdown("</div>", unsafe_allow_html=True)
