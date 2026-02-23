@@ -31,6 +31,7 @@ _init_state("manual_api_key", "")
 # ⚠️  关键修复：用两个独立标志控制 AI 请求，避免 rerun 死循环
 _init_state("pending_ai_message", None)   # {"content": str} 有消息待发送时非None
 _init_state("is_ai_thinking", False)      # AI 正在思考中标志
+_init_state("thinking_started_at", None)  # 开始时间戳，超过40秒自动重置
 
 def t(text_en, text_zh=None):
     if st.session_state.language == "zh":
@@ -759,17 +760,33 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         st.session_state.pending_ai_message = None
         st.session_state.is_ai_thinking = False
 
+    # ── 超时保护：is_ai_thinking 超过 45 秒自动重置，防止永久卡住 ──
+    if st.session_state.is_ai_thinking:
+        ts = st.session_state.get("thinking_started_at")
+        if ts is None or (time.time() - ts) > 45:
+            st.session_state.is_ai_thinking = False
+            st.session_state.thinking_started_at = None
+            st.session_state.pending_ai_message = None
+            # 如果卡住了，给用户一个错误消息
+            if ts is not None:
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": "⏱️ **请求超时（45s）**，千问服务器响应过慢。请稍后重试，或在设置中切换为 qwen-turbo 模型。",
+                    "is_error": True
+                })
+
     # ── 处理待发送消息（在渲染之前执行，避免死循环）──
-    # ⚠️ 关键修复：在此处消费 pending_ai_message，且只执行一次
     if st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
         pending = st.session_state.pending_ai_message
         st.session_state.is_ai_thinking = True
+        st.session_state.thinking_started_at = time.time()  # 记录开始时间
         st.session_state.pending_ai_message = None  # 立即清除，防止重复触发
 
-        with st.spinner("🧬 风味顾问思考中..."):
+        with st.spinner("🧬 风味顾问思考中（qwen-turbo 通常 5-10 秒）..."):
             _do_ai_request(pending["content"], context_str)
 
-        st.rerun()  # 刷新以显示结果
+        st.session_state.thinking_started_at = None
+        st.rerun()
 
     # ── 渲染历史消息 ──
     if st.session_state.chat_history:
@@ -1155,52 +1172,75 @@ def render_empty_state(df):
     """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # 两个示例卡片
+    # ── 三个示例卡片（共振 / 平衡 / 对比）──
     st.markdown("<div class='card'><h4 class='card-title'>✨ 选择一个示例开始体验</h4>", unsafe_allow_html=True)
-    st.markdown('<p style="font-size:.82rem;color:var(--text-muted);margin-bottom:14px">两种截然不同的搭配逻辑——点击任意一个，立刻看到分子分析结果</p>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:.82rem;color:var(--text-muted);margin-bottom:16px">三种搭配逻辑——点击卡片，立刻看到分子分析结果，亲身感受分数的含义</p>', unsafe_allow_html=True)
 
-    available = set(df["name"].values)
-    col_res, col_ctr = st.columns(2, gap="large")
+    # 用不区分大小写的匹配，确保食材名正确找到
+    available_lower = {n.lower(): n for n in df["name"].values}
+    def find_pair(candidates):
+        for a, b in candidates:
+            ra = available_lower.get(a.lower())
+            rb = available_lower.get(b.lower())
+            if ra and rb:
+                return ra, rb
+        return None
 
-    resonance_examples = [("Coffee","Cocoa"),("Strawberry","Raspberry"),("Lemon","Orange"),("Garlic","Onion")]
-    res_pair = next(((a,b) for a,b in resonance_examples if a in available and b in available), None)
+    resonance_candidates = [("Coffee","Cocoa"),("Strawberry","Raspberry"),("Lemon","Orange juice"),
+                            ("Butter","Cream"),("Garlic","Onion"),("Coffee","dark chocolate")]
+    balance_candidates   = [("Coffee","Strawberry"),("Tomato","Strawberry"),("Chicken","Lemon"),
+                            ("Garlic","Tomato"),("Honey","Lemon"),("Coffee","Cardamom")]
+    contrast_candidates  = [("dark chocolate","Chili"),("Strawberry","Black pepper"),
+                            ("Coffee","Grapefruit"),("Tomato","Vanilla"),("Garlic","Strawberry"),
+                            ("Butter","Grapefruit"),("Coffee","Chili")]
 
-    with col_res:
-        if res_pair:
-            ra, rb = res_pair
-            cna, cnb = t_ingredient(ra), t_ingredient(rb)
-            st.markdown(f"""
-            <div style="background:linear-gradient(135deg,#0d2818,#0a2a18);border:1px solid #166534;
-              border-radius:14px;padding:20px;text-align:center;min-height:150px;margin-bottom:8px">
-              <div style="font-size:.7rem;color:#4ade80;font-weight:700;letter-spacing:.08em;margin-bottom:8px">🟢 同源共振示例</div>
-              <div style="font-size:1.4rem;font-weight:900;background:linear-gradient(90deg,#4ade80,#00D2FF);
-                -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px">{cna} × {cnb}</div>
-              <div style="font-size:.76rem;color:rgba(255,255,255,.55);line-height:1.5">共享大量香气分子，风味叠加增强<br>适合探索「主从」搭配关系</div>
-            </div>""", unsafe_allow_html=True)
-            if st.button(f"🟢 体验同源共振", key="demo_resonance", use_container_width=True):
-                st.session_state["random_selection"] = [ra, rb]
-                st.session_state.sidebar_tab = "实验台"
-                st.rerun()
+    res_pair = find_pair(resonance_candidates)
+    bal_pair = find_pair(balance_candidates)
+    ctr_pair = find_pair(contrast_candidates)
 
-    contrast_examples = [("dark chocolate","Chili"),("Coffee","Orange"),("Garlic","Strawberry"),("Tomato","Vanilla")]
-    ctr_pair = next(((a,b) for a,b in contrast_examples if a in available and b in available), None)
+    col_res, col_bal, col_ctr = st.columns(3, gap="medium")
 
-    with col_ctr:
-        if ctr_pair:
-            ca, cb = ctr_pair
-            cna2, cnb2 = t_ingredient(ca), t_ingredient(cb)
-            st.markdown(f"""
-            <div style="background:linear-gradient(135deg,#2d0d0d,#1a0808);border:1px solid #7f1d1d;
-              border-radius:14px;padding:20px;text-align:center;min-height:150px;margin-bottom:8px">
-              <div style="font-size:.7rem;color:#f87171;font-weight:700;letter-spacing:.08em;margin-bottom:8px">🔴 对比碰撞示例</div>
-              <div style="font-size:1.4rem;font-weight:900;background:linear-gradient(90deg,#f87171,#F97316);
-                -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px">{cna2} × {cnb2}</div>
-              <div style="font-size:.76rem;color:rgba(255,255,255,.55);line-height:1.5">分子差异显著，产生对比张力<br>适合探索「惊喜碰撞」逻辑</div>
-            </div>""", unsafe_allow_html=True)
-            if st.button(f"🔴 体验对比碰撞", key="demo_contrast", use_container_width=True):
-                st.session_state["random_selection"] = [ca, cb]
-                st.session_state.sidebar_tab = "实验台"
-                st.rerun()
+    def demo_card(col, pair, style, label_color, bg, border, grad, btn_key, icon, label, desc):
+        with col:
+            if pair:
+                pa, pb = pair
+                cna, cnb = t_ingredient(pa), t_ingredient(pb)
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid {border};border-radius:14px;
+                  padding:16px;text-align:center;min-height:148px;margin-bottom:8px">
+                  <div style="font-size:.68rem;color:{label_color};font-weight:700;
+                    letter-spacing:.08em;margin-bottom:8px">{icon} {label}</div>
+                  <div style="font-size:1.2rem;font-weight:900;background:{grad};
+                    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+                    margin-bottom:8px;line-height:1.3">{cna}<br>× {cnb}</div>
+                  <div style="font-size:.73rem;color:rgba(255,255,255,.5);line-height:1.4">{desc}</div>
+                </div>""", unsafe_allow_html=True)
+                btn_label = f"{icon} {cna} × {cnb}"
+                if st.button(btn_label, key=btn_key, use_container_width=True):
+                    st.session_state["random_selection"] = [pa, pb]
+                    st.session_state.sidebar_tab = "实验台"
+                    st.rerun()
+
+    demo_card(col_res, res_pair,
+        style="green",
+        label_color="#4ade80", bg="linear-gradient(135deg,#0d2818,#0a2a18)", border="#166534",
+        grad="linear-gradient(90deg,#4ade80,#00D2FF)", btn_key="demo_resonance",
+        icon="🟢", label="同源共振 73-97",
+        desc="大量共享分子<br>风味叠加放大")
+
+    demo_card(col_bal, bal_pair,
+        style="orange",
+        label_color="#fb923c", bg="linear-gradient(135deg,#1a1500,#1e1a00)", border="#92400e",
+        grad="linear-gradient(90deg,#fbbf24,#fb923c)", btn_key="demo_balance",
+        icon="🟡", label="平衡搭档 46-72",
+        desc="交叠有差异<br>1+1>2 的最佳创作区")
+
+    demo_card(col_ctr, ctr_pair,
+        style="red",
+        label_color="#f87171", bg="linear-gradient(135deg,#2d0d0d,#1a0808)", border="#7f1d1d",
+        grad="linear-gradient(90deg,#f87171,#F97316)", btn_key="demo_contrast",
+        icon="🔴", label="对比碰撞 18-45",
+        desc="分子差异显著<br>产生惊喜张力")
 
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown(f'<div style="text-align:center;padding:16px;color:var(--text-faint);font-size:.75rem">🧬 FlavorDB · {len(df)} 种食材 · 分子风味科学</div>', unsafe_allow_html=True)
