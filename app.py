@@ -101,19 +101,15 @@ def check_api_status():
 # ================================================================
 # 2. AI 调用引擎 —— 统一 OpenAI 兼容接口调用千问
 # ================================================================
-FLAVOR_GEM_PROMPT = """你是「风味虫洞顾问」，分子美食科学家。基于食材分子结构、味觉互补提供创意风味方案。
+FLAVOR_GEM_PROMPT = """你是风味科学顾问。基于食材分子数据给出简洁专业的中文回答，控制在250字内。
 
-【当前实验数据】
-{context}
+数据：{context}
 
-【回复结构（简洁有力，每项2-3句）】
-🛰️ 虫洞坐标：两种食材的味觉维度定位
-🌀 关联逻辑：分子共鸣或对比碰撞的核心原理
-🧪 实验报告：入口→中段→尾韵三段感官曲线
-👨‍🍳 厨师应用：2个具体烹饪场景
-📊 风味星图：最优比例或关键处理技法
-
-语气专业前卫。结尾提一个延伸探索问题。中文回答，控制在400字内。"""
+格式：
+🌀 分子逻辑（1-2句）
+🧪 感官曲线：入口→中段→尾韵
+👨‍🍳 烹饪应用（1个具体场景）
+💡 延伸探索（1个问题）"""
 
 def call_ai_api(messages, context, max_retries=2):
     """
@@ -142,7 +138,7 @@ def call_ai_api(messages, context, max_retries=2):
     client = openai.OpenAI(
         api_key=config["api_key"],
         base_url=config.get("base_url", DASHSCOPE_BASE),
-        timeout=httpx.Timeout(30.0, connect=10.0)
+        timeout=httpx.Timeout(25.0, connect=8.0)  # 严格25秒，Streamlit Cloud 60s限制
     )
 
     for attempt in range(max_retries):
@@ -150,8 +146,9 @@ def call_ai_api(messages, context, max_retries=2):
             response = client.chat.completions.create(
                 model=config.get("model", DEFAULT_MODEL),
                 messages=api_messages,
-                temperature=0.75,
-                max_tokens=800   # 控制回复长度，turbo+800token约3-5秒响应
+                temperature=0.7,
+                max_tokens=400,   # 减半：qwen-turbo 400token约3-6秒
+                stream=False
             )
             return True, response.choices[0].message.content, False
         except Exception as e:
@@ -600,17 +597,46 @@ CLASSIC_CONTRAST_PAIRS = [
     ("Strawberry",   "Balsamic vinegar", "草莓香醋 — 意大利夏日经典，甜酸对比"),
 ]
 
-# 雷达图维度：参照 SCA 咖啡风味轮 + Le Nez du Vin 葡萄酒香气轮盘
-RADAR_DIMS = {
-    "甜感": ["sweet","caramel","honey","vanilla","sugar","butterscotch","candy","molasses","toffee"],
-    "烘烤": ["roasted","baked","toasted","caramel","coffee","cocoa","bread","malt","smoky","charred"],
-    "果香": ["fruity","berry","apple","pear","peach","citrus","tropical","grape","banana","cherry","lemon"],
-    "草木": ["herbaceous","herbal","green","mint","thyme","rosemary","basil","dill","leafy","fresh","grassy"],
-    "木质": ["woody","wood","cedar","oak","resin","tobacco","leather","earthy","mushroom","pine"],
-    "辛香": ["spicy","pepper","cinnamon","ginger","clove","mustard","pungent","horseradish","anise","nutmeg"],
-    "花香": ["floral","rose","jasmine","lavender","violet","lily","blossom","jasmin","geranium","orange blossom"],
-    "醇厚": ["fatty","creamy","buttery","butter","cream","dairy","milky","nutty","waxy","oily","rich"],
+# 雷达图维度：参照 SCA 咖啡风味轮
+# 格式：{"维度": {"primary": [主关键词], "secondary": [次关键词]}}
+# 必须命中 >= 1 个 primary 词，该维度才计分（解决虚高问题）
+RADAR_DIMS_V2 = {
+    "甜感": {
+        "primary":   ["sweet","caramel","honey","vanilla","sugar"],
+        "secondary": ["butterscotch","candy","molasses","toffee","syrup","saccharine"],
+    },
+    "烘烤": {
+        "primary":   ["roasted","baked","toasted","malt","smoky"],
+        "secondary": ["coffee","cocoa","bread","charred","burnt","caramelized"],
+    },
+    "果香": {
+        "primary":   ["fruity","berry","citrus","tropical","apple"],
+        "secondary": ["pear","peach","grape","banana","cherry","lemon","melon","plum"],
+    },
+    "草木": {
+        "primary":   ["herbaceous","herbal","green","fresh","leafy"],
+        "secondary": ["mint","thyme","rosemary","basil","dill","grassy","vegetal"],
+    },
+    "木质": {
+        "primary":   ["woody","earthy","mushroom","tobacco"],
+        "secondary": ["cedar","oak","resin","leather","pine","soil","fungal"],
+    },
+    "辛香": {
+        "primary":   ["spicy","pepper","pungent","hot"],
+        "secondary": ["cinnamon","ginger","clove","mustard","horseradish","anise","nutmeg","cardamom"],
+    },
+    "花香": {
+        "primary":   ["floral","rose","jasmine","lavender"],
+        "secondary": ["violet","lily","blossom","geranium","perfumy","fragrant"],
+    },
+    "醇厚": {
+        "primary":   ["fatty","creamy","buttery","nutty"],
+        "secondary": ["butter","cream","dairy","milky","waxy","oily","rich","lactonic"],
+    },
 }
+
+# 兼容旧代码引用 RADAR_DIMS 的地方
+RADAR_DIMS = {k: v["primary"] + v["secondary"] for k, v in RADAR_DIMS_V2.items()}
 
 # 雷达图维度 tooltip 说明（鼠标悬停显示）
 RADAR_TOOLTIPS = {
@@ -626,33 +652,28 @@ RADAR_TOOLTIPS = {
 
 def radar_vals(mol_set):
     """
-    重构版雷达图算法：
-    - 每个维度最多匹配关键词数量不同，需要归一化
-    - 引入分级：1-2个关键词=基础(3-4分)，3-4个=中等(5-7分)，5+个=强烈(8-10分)
-    - 避免只要有匹配就接近满分的问题
+    雷达图算法 v4 — 精准反映食材真实风味个性：
+    - 必须命中 >= 1 个主关键词，该维度才计分（不给"微弱存在感"）
+    - 主词每命中1个 = +3分；次词每命中1个 = +1分
+    - 上限10分，未命中主词 = 0分
+    - 结果：每种食材只在真正具备的维度得分，图形有明显凹凸
     """
     result = {}
-    for dim, kws in RADAR_DIMS.items():
-        hit = sum(1 for k in kws if k in mol_set)
-        max_kws = len(kws)
+    for dim, cfg in RADAR_DIMS_V2.items():
+        primary_kws = cfg["primary"]
+        secondary_kws = cfg["secondary"]
 
-        if hit == 0:
+        primary_hits = sum(1 for k in primary_kws if k in mol_set)
+        secondary_hits = sum(1 for k in secondary_kws if k in mol_set)
+
+        if primary_hits == 0:
+            # 没有主词命中 → 该维度不是该食材的特征，严格置0
             val = 0.0
-        elif hit == 1:
-            # 仅1个关键词匹配：微弱存在感
-            val = 2.5 + random.uniform(-0.3, 0.3)
-        elif hit == 2:
-            # 2个：有该维度特征
-            val = 4.5 + random.uniform(-0.5, 0.5)
-        elif hit <= 4:
-            # 3-4个：明显特征
-            val = 5.5 + (hit - 2) * 1.0 + random.uniform(-0.3, 0.3)
         else:
-            # 5+个：强烈特征，但要根据该维度总词数归一化
-            ratio = hit / max_kws
-            val = 7.0 + ratio * 3.0
+            # 主词每个3分 + 次词每个1分，上限10
+            val = min(10.0, primary_hits * 3.0 + secondary_hits * 1.0)
 
-        result[dim] = round(min(10.0, max(0.0, val)), 1)
+        result[dim] = round(val, 1)
     return result
 
 # ================================================================
@@ -785,21 +806,17 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
 
     # ── 构建上下文 ──
     def build_context():
-        lines = [f"## 当前实验食材组合"]
-        lines.append(f"选择食材：{' + '.join(t_ingredient(n) for n in selected)}")
-        lines.append(f"\n## 分子共鸣分析")
-        lines.append(f"共鸣指数：{sim['score']}%")
-        lines.append(f"共鸣类型：{'同源共振' if sim['type']=='resonance' else '对比碰撞' if sim['type']=='contrast' else '平衡搭档'}")
-        lines.append(f"共享分子数：{len(sim['shared'])} 个")
-        lines.append(f"\n## 各食材详情")
+        # 精简 context，控制 token 消耗，加快响应
+        food_str = " + ".join(t_ingredient(n) for n in selected)
+        typ_str = "同源共振" if sim["type"]=="resonance" else ("对比碰撞" if sim["type"]=="contrast" else "平衡搭档")
+        shared_str = ", ".join(t_note(x) for x in sim["shared"][:5])
+        details = []
         for n in selected:
             pct = int(ratios.get(n, 1/len(selected))*100)
-            top5 = t_notes_list(mol_sets[n], 5)
-            lines.append(f"- **{t_ingredient(n)}**（{pct}%）：{', '.join(top5)}")
-        if sim["shared"]:
-            lines.append(f"\n## 共享风味分子（前8）")
-            lines.append(", ".join(t_note(x) for x in sim["shared"][:8]))
-        return "\n".join(lines)
+            top3 = t_notes_list(mol_sets[n], 3)
+            details.append(f"{t_ingredient(n)}({pct}%): {', '.join(top3)}")
+        return (f"食材: {food_str} | 共鸣指数: {sim['score']} | 类型: {typ_str} | "
+                f"共享分子: {shared_str} | 详情: {'; '.join(details)}")
 
     context_str = build_context()
 
@@ -1077,13 +1094,14 @@ def render_experiment_tab(df):
     st.markdown("**🎲 随机探索**")
     rand_col1, rand_col2 = st.columns(2, gap="small")
 
-    avail_set_lower = {n.lower(): n for n in df_show["name"].values}
+    # 经典配对从完整数据库查找（不受分类筛选限制）
+    all_names_lower = {n.lower(): n for n in df["name"].values}
 
     def try_classic(pairs):
-        """从经典配对中找到数据库有的一组"""
+        """从经典配对中找到完整数据库有的一组"""
         for a, b, desc in pairs:
-            ra = avail_set_lower.get(a.lower())
-            rb = avail_set_lower.get(b.lower())
+            ra = all_names_lower.get(a.lower())
+            rb = all_names_lower.get(b.lower())
             if ra and rb:
                 return ra, rb, desc
         return None
@@ -1091,7 +1109,7 @@ def render_experiment_tab(df):
     with rand_col1:
         if st.button("🟢 经典共振搭配", key="random_resonance", use_container_width=True):
             pair = try_classic(CLASSIC_RESONANCE_PAIRS)
-            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df_show["name"].unique().tolist()), 2) if len(df_show) >= 2 else [])
+            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else [])
             if picked:
                 st.session_state["_force_defaults"] = picked
                 st.session_state["selected_ingredients"] = picked
@@ -1101,7 +1119,7 @@ def render_experiment_tab(df):
     with rand_col2:
         if st.button("🔴 经典对比碰撞", key="random_contrast", use_container_width=True):
             pair = try_classic(CLASSIC_CONTRAST_PAIRS)
-            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df_show["name"].unique().tolist()), 2) if len(df_show) >= 2 else [])
+            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else [])
             if picked:
                 st.session_state["_force_defaults"] = picked
                 st.session_state["selected_ingredients"] = picked
