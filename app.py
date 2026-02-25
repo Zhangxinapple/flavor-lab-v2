@@ -709,9 +709,7 @@ def _do_ai_request(user_content, context_str):
     if not success:
         st.session_state.last_api_error = "频率限制，请稍后重试" if is_rate_limit else "API 调用失败"
 
-    # 清理状态
-    st.session_state.pending_ai_message = None
-    st.session_state.is_ai_thinking = False
+    # 注意：is_ai_thinking / pending 由调用方（render_chat_section）统一管理，此处不重置
 
 
 def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, df):
@@ -789,21 +787,21 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
                 })
 
     # ── 处理待发送消息 ──
-    # 关键设计：pending 在此处被"原子性"消费，消费后立即清除再执行请求
-    # 执行完成后用 st.rerun() 刷新UI，但不能在 spinner 内部 rerun（会中断）
-    if st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
+    # 唯一触发点：pending 非空 且 未在思考中
+    # 使用"执行锁"：先提取内容并清除 pending，再执行请求，防止任何形式的重复触发
+    if st.session_state.get("pending_ai_message") and not st.session_state.get("is_ai_thinking"):
+        # 1. 立即提取并清除 pending（原子操作）
         pending_content = st.session_state.pending_ai_message["content"]
-
-        # 原子性清除：先清除 pending，再设置 thinking
-        # 这样即使 rerun 发生，也不会重复处理
         st.session_state.pending_ai_message = None
         st.session_state.is_ai_thinking = True
         st.session_state.thinking_started_at = time.time()
 
-        with st.spinner("🧬 风味顾问思考中..."):
+        # 2. 执行 AI 请求（同步阻塞，spinner 显示进度）
+        spinner_msg = "🧬 风味顾问思考中（qwen-turbo 通常 5-10 秒）..."
+        with st.spinner(spinner_msg):
             _do_ai_request(pending_content, context_str)
 
-        # 清除标志后刷新
+        # 3. 完成后清除锁，然后刷新 UI
         st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
         st.rerun()
@@ -1021,9 +1019,8 @@ def render_experiment_tab(df):
         prev = st.session_state.get("ing_select", [])
         defaults = [n for n in prev if n in options_set]
 
-    if len(defaults) < 2:
-        fallback = [n for n in ["Coffee", "Strawberry"] if n in options_set]
-        defaults = fallback if len(fallback) >= 2 else options[:2]
+    # 首次打开（ing_select为空且没有random_selection）→ 不填默认值 → 触发空状态引导页
+    # 只有用户主动选择、点击示例、或随机探索后才会有食材
 
     selected = st.multiselect(
         "选择食材（2-4种）", options=options, default=defaults,
@@ -1238,14 +1235,28 @@ def render_empty_state(df):
                 return ra, rb
         return None
 
-    resonance_candidates = [("Coffee","Cocoa"),("Strawberry","Raspberry"),("Lemon","Orange juice"),
-                            ("Butter","Cream"),("Garlic","Onion"),("Coffee","dark chocolate")]
-    balance_candidates   = [("Coffee","Strawberry"),("Tomato","Strawberry"),("Chicken","Lemon"),
-                            ("Garlic","Tomato"),("Honey","Lemon"),("Coffee","Cardamom")]
-    contrast_candidates  = [("dark chocolate","Chili"),("Strawberry","Black pepper"),
-                            ("Coffee","Grapefruit juice"),("Coffee","grapefruit"),
-                            ("Coffee","Chili"),("Tomato","Vanilla"),
-                            ("Garlic","Strawberry"),("Butter","Grapefruit juice")]
+    # 候选列表：多备选确保能命中数据库中的真实食材名
+    resonance_candidates = [
+        ("Coffee","Cocoa"),("Coffee","dark chocolate"),
+        ("Strawberry","Raspberry"),("Strawberry","Peach"),
+        ("Lemon","Orange"),("Garlic","Onion"),
+        ("Butter","Cream"),("Vanilla","Cinnamon"),
+        ("Tomato","Garlic"),("Ginger","Cinnamon"),
+    ]
+    balance_candidates = [
+        ("Coffee","Strawberry"),("Tomato","Strawberry"),
+        ("Coffee","Lemon"),("Coffee","Cardamom"),
+        ("Lemon","Strawberry"),("Vanilla","Strawberry"),
+        ("Garlic","Tomato"),("Coffee","Vanilla"),
+        ("Strawberry","Chocolate"),("Tomato","Basil"),
+    ]
+    contrast_candidates = [
+        ("dark chocolate","Chili"),("Strawberry","Black pepper"),
+        ("Coffee","Chili"),("Tomato","Vanilla"),
+        ("Garlic","Strawberry"),("Coffee","Garlic"),
+        ("Lemon","Garlic"),("Strawberry","Garlic"),
+        ("Chili","Vanilla"),("Coffee","Black pepper"),
+    ]
 
     res_pair = find_pair(resonance_candidates)
     bal_pair = find_pair(balance_candidates)
@@ -1258,21 +1269,27 @@ def render_empty_state(df):
             if pair:
                 pa, pb = pair
                 cna, cnb = t_ingredient(pa), t_ingredient(pb)
-                st.markdown(f"""
-                <div style="background:{bg};border:1px solid {border};border-radius:14px;
-                  padding:16px;text-align:center;min-height:148px;margin-bottom:8px">
-                  <div style="font-size:.68rem;color:{label_color};font-weight:700;
-                    letter-spacing:.08em;margin-bottom:8px">{icon} {label}</div>
-                  <div style="font-size:1.2rem;font-weight:900;background:{grad};
-                    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-                    margin-bottom:8px;line-height:1.3">{cna}<br>× {cnb}</div>
-                  <div style="font-size:.73rem;color:rgba(255,255,255,.5);line-height:1.4">{desc}</div>
-                </div>""", unsafe_allow_html=True)
-                btn_label = f"{icon} {cna} × {cnb}"
+            else:
+                cna, cnb = "—", "—"
+            st.markdown(f"""
+            <div style="background:{bg};border:1px solid {border};border-radius:14px;
+              padding:16px;text-align:center;min-height:148px;margin-bottom:8px">
+              <div style="font-size:.68rem;color:{label_color};font-weight:700;
+                letter-spacing:.08em;margin-bottom:8px">{icon} {label}</div>
+              <div style="font-size:1.2rem;font-weight:900;background:{grad};
+                -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+                margin-bottom:8px;line-height:1.3">{cna}<br>× {cnb}</div>
+              <div style="font-size:.73rem;color:rgba(255,255,255,.5);line-height:1.4">{desc}</div>
+            </div>""", unsafe_allow_html=True)
+            if pair:
+                btn_label = f"{icon} 开始体验 {cna} × {cnb}"
                 if st.button(btn_label, key=btn_key, use_container_width=True):
+                    # 直接写入 session_state，rerun 时 render_experiment_tab 会读取
                     st.session_state["random_selection"] = [pa, pb]
-                    st.session_state.sidebar_tab = "实验台"
+                    st.session_state["sidebar_tab"] = "实验台"
                     st.rerun()
+            else:
+                st.button("暂无匹配食材", key=btn_key, use_container_width=True, disabled=True)
 
     demo_card(col_res, res_pair,
         style="green",
