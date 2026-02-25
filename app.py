@@ -159,24 +159,16 @@ def call_ai_api(messages, context, max_retries=2):
                     continue
                 return False, "⚠️ **请求频率超限**，请等待 30 秒后重试。", True
             elif "overdue" in err.lower() or "good standing" in err.lower() or ("400" in err and "access denied" in err.lower()):
-                return False, (
-                    "💳 **账户欠费或未开通**
-
-"
-                    "错误：Access denied — account not in good standing
-
-"
-                    "**解决步骤：**
-"
-                    "1. 登录 [阿里云控制台](https://dashscope.console.aliyun.com/)
-"
-                    "2. 检查账户余额，充值后服务自动恢复
-"
-                    "3. 或前往「模型服务灵积」→「开通服务」确认已开通
-
-"
-                    "免费额度用完后需充值，qwen-turbo 约 0.004 元/千 Token"
-                ), False
+                msg = (
+                    "💳 **账户欠费或未开通**\n\n"
+                    "错误：Access denied — account not in good standing\n\n"
+                    "**解决步骤：**\n"
+                    "1. 登录阿里云控制台：https://dashscope.console.aliyun.com/\n"
+                    "2. 检查账户余额，充值后服务通常1-2分钟内恢复\n"
+                    "3. 确认「模型服务灵积 DashScope」已开通\n\n"
+                    "qwen-turbo 约 0.004 元/千 Token，充值10元可用很久"
+                )
+                return False, msg, False
             elif "invalid api key" in err.lower() or "authentication" in err.lower() or "401" in err:
                 return False, "❌ **API Key 无效**，请在设置中重新输入正确的 Key。", False
             elif "timeout" in err.lower() or "timed out" in err.lower():
