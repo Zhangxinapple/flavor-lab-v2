@@ -33,6 +33,7 @@ _init_state("selected_ingredients", [])  # 持久化已选食材，跨标签共�
 _init_state("pending_ai_message", None)   # {"content": str} 有消息待发送时非None
 _init_state("is_ai_thinking", False)      # AI 正在思考中标志
 _init_state("thinking_started_at", None)  # 开始时间戳，超过40秒自动重置
+_init_state("selected_groups", set())     # 分类筛选的选中大组
 
 def t(text_en, text_zh=None):
     if st.session_state.language == "zh":
@@ -509,10 +510,12 @@ def calc_sim(a, b):
     score = int(round(18 + raw * 79))
     score = max(18, min(97, score))
 
-    # 类型判定
-    if j >= 0.30 and bi_cov >= 0.25:
+    # 类型判定（v4：收紧 neutral 区间，让真正的对比组显示红色）
+    # 数据实测：典型对比组 Jaccard 在 0.05-0.15 之间
+    # 旧阈值 j>=0.10 → neutral 导致大量对比组被误判为黄色
+    if score >= 65:
         typ = "resonance"
-    elif j >= 0.10:
+    elif score >= 42:
         typ = "neutral"
     else:
         typ = "contrast"
@@ -597,15 +600,28 @@ CLASSIC_CONTRAST_PAIRS = [
     ("Strawberry",   "Balsamic vinegar", "草莓香醋 — 意大利夏日经典，甜酸对比"),
 ]
 
+# 雷达图维度：参照 SCA 咖啡风味轮 + Le Nez du Vin 葡萄酒香气轮盘
 RADAR_DIMS = {
-    "甜味": ["sweet","caramel","honey","vanilla","sugar","butterscotch","candy"],
-    "烘焙": ["roasted","baked","toasted","caramel","coffee","cocoa","bread","malt"],
-    "果香": ["fruity","berry","apple","pear","peach","citrus","tropical","grape","banana"],
-    "草本": ["herbaceous","herbal","green","mint","thyme","rosemary","basil","dill","leafy"],
-    "木质烟熏": ["woody","wood","smoky","smoke","cedar","oak","leather","tobacco","resin"],
-    "辛辣": ["spicy","pepper","cinnamon","ginger","clove","mustard","pungent","horseradish"],
-    "花香": ["floral","rose","jasmine","lavender","violet","lily","blossom","jasmin"],
-    "脂奶": ["fatty","creamy","buttery","butter","cream","dairy","milky","nutty"],
+    "甜感": ["sweet","caramel","honey","vanilla","sugar","butterscotch","candy","molasses","toffee"],
+    "烘烤": ["roasted","baked","toasted","caramel","coffee","cocoa","bread","malt","smoky","charred"],
+    "果香": ["fruity","berry","apple","pear","peach","citrus","tropical","grape","banana","cherry","lemon"],
+    "草木": ["herbaceous","herbal","green","mint","thyme","rosemary","basil","dill","leafy","fresh","grassy"],
+    "木质": ["woody","wood","cedar","oak","resin","tobacco","leather","earthy","mushroom","pine"],
+    "辛香": ["spicy","pepper","cinnamon","ginger","clove","mustard","pungent","horseradish","anise","nutmeg"],
+    "花香": ["floral","rose","jasmine","lavender","violet","lily","blossom","jasmin","geranium","orange blossom"],
+    "醇厚": ["fatty","creamy","buttery","butter","cream","dairy","milky","nutty","waxy","oily","rich"],
+}
+
+# 雷达图维度 tooltip 说明（鼠标悬停显示）
+RADAR_TOOLTIPS = {
+    "甜感": "SCA风味轮·甜香区 | 焦糖、蜂蜜、香草等甜蜜芳香；来自糖类美拉德反应，是愉悦感的核心维度",
+    "烘烤": "SCA风味轮·烘烤区 | 咖啡、可可、面包、麦芽等火焰工艺香气；高温焦糖化与美拉德反应的产物",
+    "果香": "SCA风味轮·果香区 | 浆果、苹果、柑橘、热带水果等天然酯类香气；乙酸乙酯家族的感官表达",
+    "草木": "SCA风味轮·草本区 | 薄荷、罗勒、青草、新鲜蔬菜的清新气息；源自叶绿素与萜烯类物质",
+    "木质": "SCA风味轮·木质区 | 橡木、雪松、泥土、蘑菇的沉稳深度；多酚类与腐殖质分子的表达",
+    "辛香": "SCA风味轮·香料区 | 胡椒、肉桂、生姜等刺激性香料；萜烯醛与苯基丙烷类化合物",
+    "花香": "SCA风味轮·花香区 | 玫瑰、茉莉、薰衣草的高雅芬芳；萜烯醇如芳樟醇、香叶醇的感官表达",
+    "醇厚": "SCA风味轮·质地区 | 奶油、坚果、黄油的圆润质感；长链脂肪酸与内酯类物质形成的口腔质地",
 }
 
 def radar_vals(mol_set):
@@ -796,51 +812,36 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         st.session_state.pending_ai_message = None
         st.session_state.is_ai_thinking = False
 
-    # ── 超时保护：is_ai_thinking 超过 45 秒自动重置，防止永久卡住 ──
-    if st.session_state.is_ai_thinking:
-        ts = st.session_state.get("thinking_started_at")
-        if ts is None or (time.time() - ts) > 45:
-            st.session_state.is_ai_thinking = False
-            st.session_state.thinking_started_at = None
-            st.session_state.pending_ai_message = None
-            # 如果卡住了，给用户一个错误消息
-            if ts is not None:
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": "⏱️ **请求超时（45s）**，千问服务器响应过慢。请稍后重试，或在设置中切换为 qwen-turbo 模型。",
-                    "is_error": True
-                })
+    # ── AI 请求状态机（唯一处理点，防止任何重复）──
+    # 规则：pending非空 且 未在思考中 → 执行一次，执行完清除锁，rerun
+    # 注意：绝对不能有任何其他地方修改 is_ai_thinking 或 pending_ai_message
+    pending = st.session_state.get("pending_ai_message")
+    thinking = st.session_state.get("is_ai_thinking", False)
+    ts = st.session_state.get("thinking_started_at")
 
-    # ── 处理待发送消息（原子执行，防止重复）──
-    if st.session_state.get("pending_ai_message") and not st.session_state.get("is_ai_thinking"):
-        pending_content = st.session_state.pending_ai_message["content"]
-        # 原子性清除并加锁
-        st.session_state.pending_ai_message = None
-        st.session_state.is_ai_thinking = True
-        st.session_state.thinking_started_at = time.time()
-
-        with st.spinner("🧬 风味顾问思考中..."):
-            _do_ai_request(pending_content, context_str)
-
+    # 检测僵死：有锁但超过60秒 → 强制解锁
+    if thinking and ts and (time.time() - ts) > 60:
         st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
+        st.session_state.pending_ai_message = None
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": "⏱️ **请求超时（60秒）** — 千问响应过慢。请重试，或在设置中确认使用 qwen-turbo。",
+            "is_error": True
+        })
         st.rerun()
 
-    # ── 超时自动恢复（思考超过50秒自动解锁）──
-    if st.session_state.get("is_ai_thinking"):
-        ts = st.session_state.get("thinking_started_at") or 0
-        elapsed = time.time() - ts
-        if elapsed > 50:
-            st.session_state.is_ai_thinking = False
-            st.session_state.thinking_started_at = None
-            st.session_state.pending_ai_message = None
-            timeout_msg = f"⏱️ **请求超时（{int(elapsed)}秒）**\n\n千问服务器响应太慢，请点击「清空」后重试，或在「设置」中确认使用 qwen-turbo 模型。"
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": timeout_msg,
-                "is_error": True
-            })
-            st.rerun()
+    # 正常触发：有 pending 且无锁
+    elif pending and not thinking:
+        msg_content = pending["content"]
+        st.session_state.pending_ai_message = None   # 先清 pending
+        st.session_state.is_ai_thinking = True        # 再加锁
+        st.session_state.thinking_started_at = time.time()
+        with st.spinner("🧬 风味顾问思考中..."):
+            _do_ai_request(msg_content, context_str)
+        st.session_state.is_ai_thinking = False       # 解锁
+        st.session_state.thinking_started_at = None
+        st.rerun()
 
     # ── 渲染历史消息 ──
     if st.session_state.chat_history:
@@ -993,27 +994,71 @@ def render_experiment_tab(df):
     is_vegan = st.toggle("🌿 仅植物基 Vegan", value=st.session_state.vegan_on, key="vegan_toggle")
     st.session_state.vegan_on = is_vegan
 
-    all_cats = sorted(df["category"].unique().tolist())
-    available_cats = [c for c in all_cats if not (is_vegan and any(kw in c.lower() for kw in ANIMAL_KW))]
-    clean_selected = st.session_state.selected_cats & set(available_cats)
+    # ── Vegan 过滤（先过滤数据，再建分类列表）──
+    # 扩展动物性关键词，修复"香肠出现在Vegan"的问题
+    ANIMAL_CATS = {"meat","dairy","fish","seafood","pork","beef","chicken","egg",
+                   "alcohol","poultry","shellfish","sausage","ham","bacon",
+                   "lamb","veal","duck","turkey","anchovy","lard","gelatin"}
+    if is_vegan:
+        df_base = df[~df["category"].str.lower().apply(
+            lambda c: any(kw in c.lower() for kw in ANIMAL_CATS))]
+    else:
+        df_base = df
 
-    new_cats = st.multiselect(
-        "🗂 按分类筛选", options=available_cats,
-        default=sorted(clean_selected), format_func=t_category,
-        key="cat_ms"
-    )
-    if set(new_cats) != st.session_state.selected_cats:
-        st.session_state.selected_cats = set(new_cats)
+    # ── 分类按钮组（替代 multiselect）──
+    all_cats = sorted(df_base["category"].unique().tolist())
+    # 对分类做大众友好的分组映射
+    CAT_GROUP = {
+        "🌾 谷物淀粉": ["cereal","grain","flour","starch","bread","rice","wheat","corn","oat"],
+        "🫑 蔬菜": ["vegetable","veggie","root","tuber","onion","garlic","pepper","cabbage","bean","legume","pea"],
+        "🍎 水果": ["fruit","berry","citrus","tropical","melon","stone fruit","apple","banana"],
+        "🌿 香草香料": ["herb","spice","seed","bark","leaf","seasoning","flavoring"],
+        "🍄 菌菇": ["mushroom","fungus","truffle","fungi"],
+        "☕ 饮品原料": ["beverage","coffee","tea","cocoa","chocolate","cacao"],
+        "🧈 油脂坚果": ["nut","oil","fat","seed oil","butter"],
+        "🐟 海鲜水产": ["fish","seafood","shellfish","shrimp","crab","lobster","anchovy"],
+        "🥩 肉类蛋奶": ["meat","poultry","dairy","egg","cheese","milk","beef","pork","chicken","lamb"],
+        "🧪 发酵腌制": ["fermented","pickled","vinegar","wine","beer","miso","sauce"],
+        "🍬 甜味调料": ["sugar","sweet","syrup","jam","candy","confectionery"],
+        "🌊 其他": [],
+    }
+
+    def get_group(cat):
+        cat_l = cat.lower()
+        for group, kws in CAT_GROUP.items():
+            if any(kw in cat_l for kw in kws):
+                return group
+        return "🌊 其他"
+
+    # 按大组聚合分类
+    cat_to_group = {c: get_group(c) for c in all_cats}
+    groups_present = sorted(set(cat_to_group.values()))
+
+    st.markdown('<div style="font-size:.82rem;color:var(--text-muted);margin-bottom:6px">🗂 按大类筛选（可多选）</div>', unsafe_allow_html=True)
+    
+    selected_groups = st.session_state.get("selected_groups", set())
+    # 清除已不存在的分类
+    selected_groups = selected_groups & set(groups_present)
+    
+    # 渲染分类按钮（用 checkbox 模拟按钮组）
+    btn_cols = st.columns(3)
+    new_groups = set()
+    for gi, grp in enumerate(groups_present):
+        checked = grp in selected_groups
+        with btn_cols[gi % 3]:
+            if st.checkbox(grp, value=checked, key=f"grp_{gi}"):
+                new_groups.add(grp)
+    
+    if new_groups != selected_groups:
+        st.session_state["selected_groups"] = new_groups
         st.rerun()
 
-    if st.session_state.selected_cats:
-        df_show = df[df["category"].isin(st.session_state.selected_cats)]
+    # 根据选中的大组确定显示的食材
+    if new_groups:
+        selected_raw_cats = {c for c, g in cat_to_group.items() if g in new_groups}
+        df_show = df_base[df_base["category"].isin(selected_raw_cats)]
     else:
-        df_show = df
-
-    if is_vegan:
-        df_show = df_show[~df_show["category"].str.lower().apply(
-            lambda c: any(kw in c for kw in ANIMAL_KW))]
+        df_show = df_base
 
     search_query = st.text_input("🔍 搜索食材", key="search_box", placeholder="输入名称...")
     if search_query.strip():
@@ -1046,33 +1091,21 @@ def render_experiment_tab(df):
     with rand_col1:
         if st.button("🟢 经典共振搭配", key="random_resonance", use_container_width=True):
             pair = try_classic(CLASSIC_RESONANCE_PAIRS)
-            if pair:
-                ra, rb, desc = pair
-                st.session_state["random_selection"] = [ra, rb]
-                st.session_state["selected_ingredients"] = [ra, rb]
-                st.session_state["_random_desc"] = f"🟢 {desc}"
-            else:
-                opts = sorted(df_show["name"].unique().tolist())
-                if len(opts) >= 2:
-                    picked = random.sample(opts, 2)
-                    st.session_state["random_selection"] = picked
-                    st.session_state["selected_ingredients"] = picked
+            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df_show["name"].unique().tolist()), 2) if len(df_show) >= 2 else [])
+            if picked:
+                st.session_state["_force_defaults"] = picked
+                st.session_state["selected_ingredients"] = picked
+                st.session_state["_random_desc"] = f"🟢 {pair[2]}" if pair else ""
             st.rerun()
 
     with rand_col2:
         if st.button("🔴 经典对比碰撞", key="random_contrast", use_container_width=True):
             pair = try_classic(CLASSIC_CONTRAST_PAIRS)
-            if pair:
-                ra, rb, desc = pair
-                st.session_state["random_selection"] = [ra, rb]
-                st.session_state["selected_ingredients"] = [ra, rb]
-                st.session_state["_random_desc"] = f"🔴 {desc}"
-            else:
-                opts = sorted(df_show["name"].unique().tolist())
-                if len(opts) >= 2:
-                    picked = random.sample(opts, 2)
-                    st.session_state["random_selection"] = picked
-                    st.session_state["selected_ingredients"] = picked
+            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df_show["name"].unique().tolist()), 2) if len(df_show) >= 2 else [])
+            if picked:
+                st.session_state["_force_defaults"] = picked
+                st.session_state["selected_ingredients"] = picked
+                st.session_state["_random_desc"] = f"🔴 {pair[2]}" if pair else ""
             st.rerun()
 
     # 显示经典配对的描述
@@ -1082,20 +1115,15 @@ def render_experiment_tab(df):
     options = sorted(df_show["name"].unique().tolist())
     options_set = set(options)
 
-    # 优先级：随机探索 > 加入实验 > 上次选择 > 兜底
-    random_sel = st.session_state.pop("random_selection", None)
-    pending_add = st.session_state.pop("_pending_ingredient_list", None)
+    # 优先级：_force_defaults(随机/示例) > selected_ingredients(持久化) > 空
+    force = st.session_state.pop("_force_defaults", None)
+    st.session_state.pop("random_selection", None)        # 兼容旧代码，清除避免干扰
+    st.session_state.pop("_pending_ingredient_list", None)
 
-    if random_sel:
-        defaults = [n for n in random_sel if n in options_set]
-    elif pending_add:
-        defaults = [n for n in pending_add if n in options_set]
+    if force:
+        defaults = [n for n in force if n in options_set]
     else:
-        prev = st.session_state.get("ing_select", [])
-        defaults = [n for n in prev if n in options_set]
-
-    # 首次打开（ing_select为空且没有random_selection）→ 不填默认值 → 触发空状态引导页
-    # 只有用户主动选择、点击示例、或随机探索后才会有食材
+        defaults = [n for n in st.session_state.get("selected_ingredients", []) if n in options_set]
 
     selected = st.multiselect(
         "选择食材（2-4种）", options=options, default=defaults,
@@ -1195,7 +1223,7 @@ def render_settings_tab():
     new_model = model_options[selected_label]
     if new_model != st.session_state.get("manual_model"):
         st.session_state.manual_model = new_model
-        st.toast(f"✅ 已切换到 {new_model}", icon="⚡")
+        st.warning("⚠️ 最多支持4种食材")
         st.rerun()
 
     st.caption("Secrets 中的 DASHSCOPE_MODEL 会覆盖此选择。如仍然很慢，请检查 Secrets 设置。")
@@ -1362,8 +1390,8 @@ def render_empty_state(df):
             if pair:
                 btn_label = f"{icon} 开始体验 {cna} × {cnb}"
                 if st.button(btn_label, key=btn_key, use_container_width=True):
-                    # 直接写入 session_state，rerun 时 render_experiment_tab 会读取
-                    st.session_state["random_selection"] = [pa, pb]
+                    st.session_state["_force_defaults"] = [pa, pb]
+                    st.session_state["selected_ingredients"] = [pa, pb]
                     st.session_state["sidebar_tab"] = "实验台"
                     st.rerun()
             else:
@@ -1409,7 +1437,7 @@ def main():
         st.session_state["_pending_ingredient_list"] = new_list
     if "_add_warn" in st.session_state:
         del st.session_state["_add_warn"]
-        st.toast("⚠️ 最多支持4种食材", icon="⚠️")
+        st.warning("⚠️ 最多支持4种食材")
 
     # Hero
     _, btn_col = st.columns([9, 1])
@@ -1489,10 +1517,12 @@ def main():
             vals_s = [min(10, v*scale) for v in vals] + [min(10, vals[0]*scale)]
             lc, fc = palette[i]
             pct = int(ratios.get(name, 1/len(selected))*100)
+            hover_texts = [f"<b>{d.split(chr(10))[0]}</b><br>{RADAR_TOOLTIPS.get(d,'')}<br>分值: {vals_s[di]:.1f}/10" for di,d in enumerate(dims)] + [""]
             fig_radar.add_trace(go.Scatterpolar(
                 r=vals_s, theta=dims+[dims[0]], fill="toself", fillcolor=fc,
                 line=dict(color=lc, width=2.5), name=f"{t_ingredient(name)} ({pct}%)",
-                mode='lines+markers', marker=dict(size=4)
+                mode='lines+markers', marker=dict(size=4),
+                text=hover_texts, hovertemplate="%{text}<extra></extra>"
             ))
         fig_radar.update_layout(
             polar=dict(bgcolor="rgba(248,249,255,0.4)",
@@ -1676,21 +1706,51 @@ def main():
         pol = polarity_analysis(mol_sets[n1] | mol_sets[n2])
         if pol["total"] > 0:
             st.markdown('<div class="card"><h4 class="card-title">💧 介质推演</h4>', unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.6;
+              border-left:3px solid #7B2FF7;padding-left:10px">
+              <b style="color:var(--text-primary)">什么是介质推演？</b><br>
+              香气分子分为「脂溶性」（溶于油脂）和「水溶性」（溶于水）两类。
+              选择正确的烹饪介质，能让芳香分子最大程度释放。
+              脂溶性组合适合油封/奶油烹调；水溶性组合适合水煮/清蒸；双亲性可乳化兼顾两者。
+            </div>""", unsafe_allow_html=True)
             lp = int(pol["lipo"]/pol["total"]*100); hp = 100-lp
+            bar_html = f'''<div style="display:flex;height:8px;border-radius:4px;overflow:hidden;margin:8px 0">
+              <div style="width:{lp}%;background:linear-gradient(90deg,#F97316,#FBBF24)"></div>
+              <div style="width:{hp}%;background:linear-gradient(90deg,#3B82F6,#00D2FF)"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text-muted)">
+              <span>🫙 脂溶 {lp}%</span><span>💧 水溶 {hp}%</span>
+            </div>'''
             if pol["type"] == "lipophilic":
                 st.markdown(f"""<div class="diag diag-ctr">
-                  <b>🫙 脂溶性主导</b> （脂溶 {lp}% / 水溶 {hp}%）<br>
-                  推荐：{tech_tip("Confit")}、{tech_tip("甘纳许")}、{tech_tip("乳化")}酱汁
+                  <b>🫙 脂溶性主导</b><br>{bar_html}<br>
+                  <b>为什么：</b>两种食材的主要芳香分子都偏向脂溶，油脂是最佳溶剂。<br><br>
+                  <b>烹饪启发：</b><br>
+                  · {tech_tip("Confit")} 油封 — 在低温油脂中缓慢萃取脂溶香气<br>
+                  · {tech_tip("甘纳许")} 巧克力乳化 — 将香气锁入油脂结晶<br>
+                  · 黄油收汁 — 高温焦化黄油载体，聚合脂溶风味<br>
+                  · 避免：水煮会流失大量香气分子
                 </div>""", unsafe_allow_html=True)
             elif pol["type"] == "hydrophilic":
                 st.markdown(f"""<div class="diag diag-info">
-                  <b>🫗 水溶性主导</b> （水溶 {hp}% / 脂溶 {lp}%）<br>
-                  推荐：{tech_tip("Consommé")}、冰沙、{tech_tip("真空萃取")}
+                  <b>💧 水溶性主导</b><br>{bar_html}<br>
+                  <b>为什么：</b>主要芳香分子偏向水溶，水性介质能最大程度展现香气。<br><br>
+                  <b>烹饪启发：</b><br>
+                  · {tech_tip("Consommé")} 澄清高汤 — 保留纯净水溶香气<br>
+                  · {tech_tip("真空萃取")} — 低温保全热敏感水溶分子<br>
+                  · 冰沙 / 冰激凌 — 低温延缓挥发，香气更持久<br>
+                  · 避免：高温长时间油煎会破坏水溶分子结构
                 </div>""", unsafe_allow_html=True)
             else:
                 st.markdown(f"""<div class="diag diag-res">
-                  <b>⚖️ 双亲性平衡</b> （脂溶 {lp}% / 水溶 {hp}%）<br>
-                  推荐：{tech_tip("乳化酱汁")}、{tech_tip("Espuma")}、{tech_tip("真空萃取")}
+                  <b>⚖️ 双亲性平衡</b><br>{bar_html}<br>
+                  <b>为什么：</b>脂溶与水溶各约一半，是最适合乳化工艺的组合。<br><br>
+                  <b>烹饪启发：</b><br>
+                  · {tech_tip("乳化酱汁")} — 同时释放两类香气，层次最丰富<br>
+                  · {tech_tip("Espuma")} 泡沫 — 气泡界面放大嗅觉感知<br>
+                  · 黄油白酱 Beurre Blanc — 乳化平衡，兼顾鲜爽与醇厚<br>
+                  · 最佳比例：乳化剂用量约为油脂的 1.5-2%
                 </div>""", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1760,10 +1820,10 @@ def main():
                     if bname not in curr and len(curr) < 4:
                         curr.append(bname)
                         st.session_state["selected_ingredients"] = curr
-                        st.session_state["_add_ingredient"] = curr  # 同步 multiselect default
+                        st.session_state["_force_defaults"] = curr  # 同步 multiselect default
                         st.rerun()
                     elif len(curr) >= 4:
-                        st.toast("⚠️ 最多支持4种食材", icon="⚠️")
+                        st.warning("⚠️ 最多支持4种食材")
         else:
             st.info("未找到合适的桥接食材")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1791,10 +1851,10 @@ def main():
                     if cname not in curr and len(curr) < 4:
                         curr.append(cname)
                         st.session_state["selected_ingredients"] = curr
-                        st.session_state["_add_ingredient"] = curr
+                        st.session_state["_force_defaults"] = curr
                         st.rerun()
                     elif len(curr) >= 4:
-                        st.toast("⚠️ 最多支持4种食材", icon="⚠️")
+                        st.warning("⚠️ 最多支持4种食材")
         else:
             st.info("未找到合适的对比食材")
         st.markdown("</div>", unsafe_allow_html=True)
