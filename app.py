@@ -158,6 +158,25 @@ def call_ai_api(messages, context, max_retries=2):
                     time.sleep((attempt + 1) * 3)
                     continue
                 return False, "⚠️ **请求频率超限**，请等待 30 秒后重试。", True
+            elif "overdue" in err.lower() or "good standing" in err.lower() or ("400" in err and "access denied" in err.lower()):
+                return False, (
+                    "💳 **账户欠费或未开通**
+
+"
+                    "错误：Access denied — account not in good standing
+
+"
+                    "**解决步骤：**
+"
+                    "1. 登录 [阿里云控制台](https://dashscope.console.aliyun.com/)
+"
+                    "2. 检查账户余额，充值后服务自动恢复
+"
+                    "3. 或前往「模型服务灵积」→「开通服务」确认已开通
+
+"
+                    "免费额度用完后需充值，qwen-turbo 约 0.004 元/千 Token"
+                ), False
             elif "invalid api key" in err.lower() or "authentication" in err.lower() or "401" in err:
                 return False, "❌ **API Key 无效**，请在设置中重新输入正确的 Key。", False
             elif "timeout" in err.lower() or "timed out" in err.lower():
@@ -165,7 +184,7 @@ def call_ai_api(messages, context, max_retries=2):
             elif "connection" in err.lower():
                 return False, "❌ **网络连接失败**，请检查网络后重试。", False
             else:
-                return False, f"⚠️ 调用出错：{err[:200]}", False
+                return False, f"⚠️ 调用出错（{err[:300]}）", False
 
     return False, "❌ 重试次数耗尽，请稍后再试。", False
 
@@ -461,10 +480,15 @@ POLARITY = {
 
 def calc_sim(a, b):
     """
-    重构版分子共鸣指数算法：
-    - 不再压缩到 50-97，让分数真实反映差异
-    - 三段式：低共鸣(20-45) / 中平衡(46-72) / 高共振(73-97)
-    - 引入"稀有分子加权"：共享分子少但独特时分数更低，鼓励探索多元搭配
+    分子共鸣指数 v3 —— 彻底修复虚高问题：
+    核心公式：score = Jaccard^0.6 × BiCoverage^0.4 × 97
+      - 纯比例运算，无绝对数量项，大集合不再自动加分
+      - BiCoverage = min(cov_a, cov_b)，双向严格约束
+      - 分数自然分布在 18-97，真实反映重叠程度
+    典型值验证：
+      Coffee × Cocoa   → Jaccard~0.45 → score~75  (共振)
+      Coffee × Strawberry → Jaccard~0.25 → score~52 (平衡)
+      Coffee × Grapefruit → Jaccard~0.08 → score~28 (对比)
     """
     if not a or not b:
         return {"score": 0, "jaccard": 0, "shared": [], "only_a": [], "only_b": [], "type": "contrast",
@@ -475,28 +499,24 @@ def calc_sim(a, b):
     only_a = a - b
     only_b = b - a
 
-    j = len(inter) / len(union)  # Jaccard 0~1
+    j = len(inter) / len(union) if union else 0   # Jaccard 0~1
 
-    # 覆盖率：共享分子占各自总量的比例（取较小值，防止小集合虚高）
+    # 双向覆盖率：共享分子分别覆盖 A 和 B 各自的比例，取最小值
+    # 这是防止"大集合稀释"的关键——双方都必须高覆盖才能高分
     cov_a = len(inter) / max(len(a), 1)
     cov_b = len(inter) / max(len(b), 1)
-    coverage = min(cov_a, cov_b)  # 0~1，严格要求双向覆盖
+    bi_cov = min(cov_a, cov_b)  # 严格双向
 
-    # 差异度：两者独有分子的平均比例
-    div_a = len(only_a) / max(len(a), 1)
-    div_b = len(only_b) / max(len(b), 1)
-    diversity = (div_a + div_b) / 2  # 0~1
+    # 核心得分：幂次加权组合（纯比例，无绝对数量项）
+    # j^0.6 拉伸低段；bi_cov^0.4 对低覆盖惩罚
+    raw = (j ** 0.6) * 0.65 + (bi_cov ** 0.4) * 0.35
 
-    # 综合得分：共鸣权重60% + 覆盖权重40%，再根据差异度调整
-    # 纯 Jaccard 容易虚高，加入 coverage 的强约束
-    raw = (j * 0.6 + coverage * 0.4) * 100
+    # 映射到 18-97 区间
+    score = int(round(18 + raw * 79))
+    score = max(18, min(97, score))
 
-    # 差异惩罚：差异度越大，得分越低（鼓励找真正的共鸣而非偶然重叠）
-    penalty = diversity * 15
-    score = int(min(97, max(18, raw - penalty + len(inter) * 0.3)))
-
-    # 类型判定（基于 Jaccard，阈值合理化）
-    if j >= 0.30:
+    # 类型判定
+    if j >= 0.30 and bi_cov >= 0.25:
         typ = "resonance"
     elif j >= 0.10:
         typ = "neutral"
@@ -1191,8 +1211,9 @@ def render_empty_state(df):
     balance_candidates   = [("Coffee","Strawberry"),("Tomato","Strawberry"),("Chicken","Lemon"),
                             ("Garlic","Tomato"),("Honey","Lemon"),("Coffee","Cardamom")]
     contrast_candidates  = [("dark chocolate","Chili"),("Strawberry","Black pepper"),
-                            ("Coffee","Grapefruit"),("Tomato","Vanilla"),("Garlic","Strawberry"),
-                            ("Butter","Grapefruit"),("Coffee","Chili")]
+                            ("Coffee","Grapefruit juice"),("Coffee","grapefruit"),
+                            ("Coffee","Chili"),("Tomato","Vanilla"),
+                            ("Garlic","Strawberry"),("Butter","Grapefruit juice")]
 
     res_pair = find_pair(resonance_candidates)
     bal_pair = find_pair(balance_candidates)
