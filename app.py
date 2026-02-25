@@ -52,8 +52,9 @@ def get_api_config():
     # 1. 手动输入（最高优先级）
     manual = st.session_state.get("manual_api_key", "").strip()
     if manual and len(manual) > 20:
+        manual_model = st.session_state.get("manual_model", DEFAULT_MODEL)
         return {"provider": "dashscope", "api_key": manual,
-                "model": DEFAULT_MODEL, "base_url": DASHSCOPE_BASE}
+                "model": manual_model, "base_url": DASHSCOPE_BASE}
 
     # 2. Streamlit Secrets
     try:
@@ -787,16 +788,23 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
                     "is_error": True
                 })
 
-    # ── 处理待发送消息（在渲染之前执行，避免死循环）──
+    # ── 处理待发送消息 ──
+    # 关键设计：pending 在此处被"原子性"消费，消费后立即清除再执行请求
+    # 执行完成后用 st.rerun() 刷新UI，但不能在 spinner 内部 rerun（会中断）
     if st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
-        pending = st.session_state.pending_ai_message
+        pending_content = st.session_state.pending_ai_message["content"]
+
+        # 原子性清除：先清除 pending，再设置 thinking
+        # 这样即使 rerun 发生，也不会重复处理
+        st.session_state.pending_ai_message = None
         st.session_state.is_ai_thinking = True
-        st.session_state.thinking_started_at = time.time()  # 记录开始时间
-        st.session_state.pending_ai_message = None  # 立即清除，防止重复触发
+        st.session_state.thinking_started_at = time.time()
 
-        with st.spinner("🧬 风味顾问思考中（qwen-turbo 通常 5-10 秒）..."):
-            _do_ai_request(pending["content"], context_str)
+        with st.spinner("🧬 风味顾问思考中..."):
+            _do_ai_request(pending_content, context_str)
 
+        # 清除标志后刷新
+        st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
         st.rerun()
 
@@ -869,10 +877,17 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
     ]
     qcols = st.columns(3)
     for qi, q in enumerate(quick_qs):
-        if qcols[qi].button(q, key=f"qbtn_{qi}", use_container_width=True,
-                            disabled=st.session_state.is_ai_thinking):
-            st.session_state.pending_ai_message = {"content": q}
-            st.rerun()
+        btn_key = f"qbtn_{qi}"
+        # ⚠️ 防重复：如果已有 pending 或正在思考，完全禁用按钮
+        already_pending = (
+            st.session_state.is_ai_thinking or
+            st.session_state.pending_ai_message is not None
+        )
+        if qcols[qi].button(q, key=btn_key, use_container_width=True, disabled=already_pending):
+            # 二次检查：只有当前没有任何待处理消息才设置
+            if not st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
+                st.session_state.pending_ai_message = {"content": q}
+                st.rerun()
 
     # ── 文本输入 + 发送 ──
     st.markdown("<div style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border-color);'>",
@@ -894,8 +909,10 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
             disabled=st.session_state.is_ai_thinking
         )
         if send_clicked and user_input.strip():
-            st.session_state.pending_ai_message = {"content": user_input.strip()}
-            st.rerun()
+            # 防重复：只有没有待处理消息时才设置
+            if not st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
+                st.session_state.pending_ai_message = {"content": user_input.strip()}
+                st.rerun()
 
     with col_clear:
         if st.button("🗑️ 清空", key="clear_btn", use_container_width=True):
@@ -1084,6 +1101,30 @@ def render_settings_tab():
 
     st.caption("Key 仅保存在当前会话，关闭页面后自动清除")
 
+    # ── 模型速度选择 ──
+    st.markdown("---")
+    st.markdown("**⚡ 模型速度**")
+    model_options = {
+        "🚀 qwen-turbo — 最快（3-8秒）推荐": "qwen-turbo",
+        "⚖️ qwen-plus  — 均衡（10-20秒）":   "qwen-plus",
+        "🧠 qwen-max   — 最强（20-40秒）":    "qwen-max",
+    }
+    current_model = st.session_state.get("manual_model", DEFAULT_MODEL)
+    current_label = next((k for k,v in model_options.items() if v == current_model),
+                         list(model_options.keys())[0])
+    selected_label = st.radio(
+        "选择模型", list(model_options.keys()),
+        index=list(model_options.keys()).index(current_label),
+        key="model_radio", label_visibility="collapsed"
+    )
+    new_model = model_options[selected_label]
+    if new_model != st.session_state.get("manual_model"):
+        st.session_state.manual_model = new_model
+        st.toast(f"✅ 已切换到 {new_model}", icon="⚡")
+        st.rerun()
+
+    st.caption("Secrets 中的 DASHSCOPE_MODEL 会覆盖此选择。如仍然很慢，请检查 Secrets 设置。")
+
     # 连接状态
     st.markdown("---")
     st.markdown("**📡 连接状态**")
@@ -1091,12 +1132,15 @@ def render_settings_tab():
 
     if api_ok:
         model = api_config.get("model", DEFAULT_MODEL)
+        speed_tip = {"qwen-turbo": "⚡ 极速", "qwen-plus": "⚖️ 均衡", "qwen-max": "🧠 最强"}.get(model, "")
         st.markdown(
             f'<div class="api-status ready"><span>✅</span>'
-            f'<span>通义千问已配置 · {model}</span></div>',
+            f'<span>通义千问已连接 · {model} {speed_tip}</span></div>',
             unsafe_allow_html=True
         )
-        st.caption("Key 格式正确。点击侧边栏外的「AI 对话」发送消息即可验证连通性。")
+        if model == "qwen-max":
+            st.warning("⚠️ 当前使用 qwen-max，响应较慢（20-40秒）。建议切换为 qwen-turbo 以获得最快响应。")
+        st.caption("Key 格式正确。发送一条消息即可验证连通性。")
     elif api_config:
         st.markdown('<div class="api-status warning"><span>⚠️</span><span>Key 格式异常</span></div>',
                     unsafe_allow_html=True)
@@ -1110,13 +1154,9 @@ def render_settings_tab():
 **在 Streamlit Cloud Secrets 中添加：**
 ```toml
 DASHSCOPE_API_KEY = "sk-你的key"
-DASHSCOPE_MODEL = "qwen-plus"
+DASHSCOPE_MODEL = "qwen-turbo"
 ```
-
-**可用模型：**
-- `qwen-turbo` — 速度最快，适合快速响应
-- `qwen-plus` — 均衡选择（**推荐**）
-- `qwen-max` — 最强能力，适合复杂分析
+⚠️ Secrets 中的模型设置会**覆盖**界面中的选择，建议设为 `qwen-turbo`
 
 **获取 Key：** https://dashscope.console.aliyun.com/
         """)
