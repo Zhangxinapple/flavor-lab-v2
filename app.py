@@ -28,6 +28,7 @@ _init_state("vegan_on", True)
 _init_state("sidebar_tab", "实验台")
 _init_state("show_debug", False)
 _init_state("manual_api_key", "")
+_init_state("selected_ingredients", [])  # 持久化已选食材，跨标签共享
 # ⚠️  关键修复：用两个独立标志控制 AI 请求，避免 rerun 死循环
 _init_state("pending_ai_message", None)   # {"content": str} 有消息待发送时非None
 _init_state("is_ai_thinking", False)      # AI 正在思考中标志
@@ -572,6 +573,30 @@ def find_contrasts(df, set_a, set_b, selected, top_n=4):
     max_score = top[0][1]
     return [(name, score/max_score, da, db) for name, score, da, db in top]
 
+
+# 全球经典风味配对数据库
+CLASSIC_RESONANCE_PAIRS = [
+    ("Coffee", "Cocoa",       "意式摩卡 — 咖啡与可可共享烘焙苦香，百年意式经典"),
+    ("Strawberry","Raspberry","法式果酱 — 莓果家族共振，酯类分子高度重叠"),
+    ("Garlic",  "Onion",      "地中海基础香 — 硫化物家族，是无数名菜的风味基石"),
+    ("Butter",  "Cream",      "法式奶香 — 脂肪酸链同源，口感绵密如一"),
+    ("Lemon",   "Orange",     "柑橘共鸣 — 萜烯类分子高度共享，酸甜叠加"),
+    ("Vanilla", "Cinnamon",   "肉桂拿铁 — 醛类香气家族共振，温暖甜蜜"),
+    ("Tomato",  "Basil",      "意式经典 — 番茄与罗勒，青草酯香完美共鸣"),
+    ("Ginger",  "Cardamom",   "印度香料茶 — 姜科共振，辛香温热"),
+]
+
+CLASSIC_CONTRAST_PAIRS = [
+    ("dark chocolate","Chili",       "Mole酱灵魂 — 苦甜与辛辣的墨西哥碰撞"),
+    ("Strawberry",   "Black pepper", "草莓黑椒 — Heston Blumenthal 名菜，甜与辛的张力"),
+    ("Coffee",       "Cardamom",     "中东咖啡 — 烘焙苦香遇上清凉辛香，文化碰撞"),
+    ("Honey",        "Garlic",       "蜂蜜大蒜 — 甜腻与辛辣，韩式烧烤秘酱"),
+    ("Lemon",        "Garlic",       "地中海鲜 — 酸亮与辛厚的完美对比"),
+    ("Vanilla",      "Chili",        "甜辣悖论 — 墨西哥辣椒巧克力的灵感来源"),
+    ("Coffee",       "Tomato",       "番茄浓缩咖啡 — 意大利 Espresso 配番茄的鲜苦碰撞"),
+    ("Strawberry",   "Balsamic vinegar", "草莓香醋 — 意大利夏日经典，甜酸对比"),
+]
+
 RADAR_DIMS = {
     "甜味": ["sweet","caramel","honey","vanilla","sugar","butterscotch","candy"],
     "烘焙": ["roasted","baked","toasted","caramel","coffee","cocoa","bread","malt"],
@@ -786,25 +811,36 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
                     "is_error": True
                 })
 
-    # ── 处理待发送消息 ──
-    # 唯一触发点：pending 非空 且 未在思考中
-    # 使用"执行锁"：先提取内容并清除 pending，再执行请求，防止任何形式的重复触发
+    # ── 处理待发送消息（原子执行，防止重复）──
     if st.session_state.get("pending_ai_message") and not st.session_state.get("is_ai_thinking"):
-        # 1. 立即提取并清除 pending（原子操作）
         pending_content = st.session_state.pending_ai_message["content"]
+        # 原子性清除并加锁
         st.session_state.pending_ai_message = None
         st.session_state.is_ai_thinking = True
         st.session_state.thinking_started_at = time.time()
 
-        # 2. 执行 AI 请求（同步阻塞，spinner 显示进度）
-        spinner_msg = "🧬 风味顾问思考中（qwen-turbo 通常 5-10 秒）..."
-        with st.spinner(spinner_msg):
+        with st.spinner("🧬 风味顾问思考中..."):
             _do_ai_request(pending_content, context_str)
 
-        # 3. 完成后清除锁，然后刷新 UI
         st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
         st.rerun()
+
+    # ── 超时自动恢复（思考超过50秒自动解锁）──
+    if st.session_state.get("is_ai_thinking"):
+        ts = st.session_state.get("thinking_started_at") or 0
+        elapsed = time.time() - ts
+        if elapsed > 50:
+            st.session_state.is_ai_thinking = False
+            st.session_state.thinking_started_at = None
+            st.session_state.pending_ai_message = None
+            timeout_msg = f"⏱️ **请求超时（{int(elapsed)}秒）**\n\n千问服务器响应太慢，请点击「清空」后重试，或在「设置」中确认使用 qwen-turbo 模型。"
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": timeout_msg,
+                "is_error": True
+            })
+            st.rerun()
 
     # ── 渲染历史消息 ──
     if st.session_state.chat_history:
@@ -988,21 +1024,60 @@ def render_experiment_tab(df):
                 mask.loc[idx] = True
         df_show = df_show[mask]
 
-    col_random, col_count = st.columns([1, 2])
-    with col_random:
-        # 问题3修复：随机探索只设置 random_selection，不赋值 widget key
-        if st.button("🎲 随机探索", key="random_explore", use_container_width=True):
-            opts = sorted(df_show["name"].unique().tolist())
-            if len(opts) >= 2:
-                picked = random.sample(opts, 2)
-                st.session_state["random_selection"] = picked
-                # 清除可能影响默认值的旧状态
-                if "_pending_ingredient_list" in st.session_state:
-                    del st.session_state["_pending_ingredient_list"]
-                st.rerun()
+    col_count = st.columns([1])[0]
     with col_count:
-        st.markdown(f'<div style="text-align:right;font-size:.82rem;color:var(--text-muted);padding-top:8px">{len(df_show)} 种食材</div>',
+        st.markdown(f'<div style="text-align:right;font-size:.82rem;color:var(--text-muted);padding-top:4px">{len(df_show)} 种食材可选</div>',
                     unsafe_allow_html=True)
+
+    st.markdown("**🎲 随机探索**")
+    rand_col1, rand_col2 = st.columns(2, gap="small")
+
+    avail_set_lower = {n.lower(): n for n in df_show["name"].values}
+
+    def try_classic(pairs):
+        """从经典配对中找到数据库有的一组"""
+        for a, b, desc in pairs:
+            ra = avail_set_lower.get(a.lower())
+            rb = avail_set_lower.get(b.lower())
+            if ra and rb:
+                return ra, rb, desc
+        return None
+
+    with rand_col1:
+        if st.button("🟢 经典共振搭配", key="random_resonance", use_container_width=True):
+            pair = try_classic(CLASSIC_RESONANCE_PAIRS)
+            if pair:
+                ra, rb, desc = pair
+                st.session_state["random_selection"] = [ra, rb]
+                st.session_state["selected_ingredients"] = [ra, rb]
+                st.session_state["_random_desc"] = f"🟢 {desc}"
+            else:
+                opts = sorted(df_show["name"].unique().tolist())
+                if len(opts) >= 2:
+                    picked = random.sample(opts, 2)
+                    st.session_state["random_selection"] = picked
+                    st.session_state["selected_ingredients"] = picked
+            st.rerun()
+
+    with rand_col2:
+        if st.button("🔴 经典对比碰撞", key="random_contrast", use_container_width=True):
+            pair = try_classic(CLASSIC_CONTRAST_PAIRS)
+            if pair:
+                ra, rb, desc = pair
+                st.session_state["random_selection"] = [ra, rb]
+                st.session_state["selected_ingredients"] = [ra, rb]
+                st.session_state["_random_desc"] = f"🔴 {desc}"
+            else:
+                opts = sorted(df_show["name"].unique().tolist())
+                if len(opts) >= 2:
+                    picked = random.sample(opts, 2)
+                    st.session_state["random_selection"] = picked
+                    st.session_state["selected_ingredients"] = picked
+            st.rerun()
+
+    # 显示经典配对的描述
+    if st.session_state.get("_random_desc"):
+        st.caption(st.session_state["_random_desc"])
 
     options = sorted(df_show["name"].unique().tolist())
     options_set = set(options)
@@ -1027,6 +1102,9 @@ def render_experiment_tab(df):
         format_func=display_name, help="最多支持4种食材同时分析",
         key="ing_select"
     )
+    # 同步到持久化 state，让配方台/设置等其他标签能读到
+    if selected:
+        st.session_state["selected_ingredients"] = selected
     return selected
 
 def render_formula_tab(selected):
@@ -1365,17 +1443,14 @@ def main():
             selected = render_experiment_tab(df)
             ratios = {}
         elif selected_tab == "配方台":
-            # 按优先级同步食材：加入实验的 > 实验台已选的 > 空（提示用户先选择）
-            current_selected = (
-                st.session_state.get("_pending_ingredient_list") or
-                st.session_state.get("ing_select") or
-                []
-            )
-            # 清除临时pending
-            if "_pending_ingredient_list" in st.session_state:
-                del st.session_state["_pending_ingredient_list"]
-            selected = [n for n in current_selected if n in df["name"].values]
-            ratios = render_formula_tab(selected) if len(selected) >= 2 else {}
+            # 从持久化 state 读取食材（不依赖 ing_select widget key）
+            selected = [n for n in st.session_state.get("selected_ingredients", [])
+                       if n in df["name"].values]
+            if len(selected) < 2:
+                st.info("💡 请先在「实验台」选择 2-4 种食材，再来配方台调整比例")
+                ratios = {}
+            else:
+                ratios = render_formula_tab(selected)
         else:
             selected = st.session_state.get("ing_select", [])
             ratios = {}
@@ -1681,15 +1756,14 @@ def main():
                   <div class="pbar-bg" style="margin-top:5px"><div class="pbar-fill" style="width:{ps}%;background:linear-gradient(90deg,#F97316,#FBBF24)"></div></div>
                 </div>""", unsafe_allow_html=True)
                 if st.button(f"➕ 加入实验", key=f"add_bridge_{bname}", use_container_width=True):
-                    curr = list(st.session_state.get("ing_select", []))
+                    curr = list(st.session_state.get("selected_ingredients", []))
                     if bname not in curr and len(curr) < 4:
                         curr.append(bname)
-                        # ⚠️ 不直接赋值 ing_select（widget key），改用中间变量
-                        st.session_state["_add_ingredient"] = curr
+                        st.session_state["selected_ingredients"] = curr
+                        st.session_state["_add_ingredient"] = curr  # 同步 multiselect default
                         st.rerun()
                     elif len(curr) >= 4:
-                        st.session_state["_add_warn"] = "max"
-                        st.rerun()
+                        st.toast("⚠️ 最多支持4种食材", icon="⚠️")
         else:
             st.info("未找到合适的桥接食材")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1713,14 +1787,14 @@ def main():
                   <div class="pbar-bg" style="margin-top:5px"><div class="pbar-fill" style="width:{ps}%;background:linear-gradient(90deg,#EF4444,#F97316)"></div></div>
                 </div>""", unsafe_allow_html=True)
                 if st.button(f"➕ 加入实验", key=f"add_contrast_{cname}", use_container_width=True):
-                    curr = list(st.session_state.get("ing_select", []))
+                    curr = list(st.session_state.get("selected_ingredients", []))
                     if cname not in curr and len(curr) < 4:
                         curr.append(cname)
+                        st.session_state["selected_ingredients"] = curr
                         st.session_state["_add_ingredient"] = curr
                         st.rerun()
                     elif len(curr) >= 4:
-                        st.session_state["_add_warn"] = "max"
-                        st.rerun()
+                        st.toast("⚠️ 最多支持4种食材", icon="⚠️")
         else:
             st.info("未找到合适的对比食材")
         st.markdown("</div>", unsafe_allow_html=True)
