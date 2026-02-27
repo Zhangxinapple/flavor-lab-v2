@@ -30,15 +30,10 @@ _init_state("show_debug", False)
 _init_state("manual_api_key", "")
 _init_state("selected_ingredients", [])  # 持久化已选食材，跨标签共享
 # ⚠️  关键修复：用两个独立标志控制 AI 请求，避免 rerun 死循环
-_init_state("pending_ai_message", None)   # {"content": str, "id": str} 有消息待发送时非None
+_init_state("pending_ai_message", None)   # {"content": str} 有消息待发送时非None
 _init_state("is_ai_thinking", False)      # AI 正在思考中标志
 _init_state("thinking_started_at", None)  # 开始时间戳，超过40秒自动重置
 _init_state("selected_groups", set())     # 分类筛选的选中大组
-# === 修复新增状态 ===
-_init_state("chat_message_id_counter", 0)  # 消息ID计数器
-_init_state("processed_message_ids", set())  # 已处理消息ID集合，防止重复
-_init_state("discovery_log", [])  # 发现日志
-_init_state("_pending_selection", None)  # 统一处理食材选择状态
 
 def t(text_en, text_zh=None):
     if st.session_state.language == "zh":
@@ -398,52 +393,6 @@ st.markdown("""
 
 #MainMenu, footer { visibility: hidden; }
 .block-container { padding-top: .8rem !important; }
-
-/* 知识术语tooltip样式 */
-.knowledge-term {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    background: linear-gradient(135deg, #EEF6FF, #F5F3FF);
-    border: 1px solid #BDD7F5;
-    border-radius: 6px;
-    padding: 1px 6px;
-    font-size: .78rem;
-    color: #1D6FDB;
-    cursor: help;
-    position: relative;
-    transition: all 0.2s ease;
-}
-.knowledge-term:hover {
-    background: linear-gradient(135deg, #DBEAFE, #EDE9FE);
-    border-color: #7C3AED;
-}
-.knowledge-term sup {
-    font-size: .6rem;
-    color: #7C3AED;
-    font-weight: 700;
-}
-
-/* 深色模式适配 */
-@media (prefers-color-scheme: dark) {
-    .knowledge-term {
-        background: linear-gradient(135deg, #0d2340, #1e0d40);
-        border-color: #1d4ed8;
-        color: #60a5fa;
-    }
-    .knowledge-term:hover {
-        background: linear-gradient(135deg, #1e3a8a, #4c1d95);
-        border-color: #a78bfa;
-    }
-    .knowledge-term sup {
-        color: #a78bfa;
-    }
-}
-[data-theme="dark"] .knowledge-term {
-    background: linear-gradient(135deg, #0d2340, #1e0d40) !important;
-    border-color: #1d4ed8 !important;
-    color: #60a5fa !important;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -754,120 +703,6 @@ def tech_tip(term):
             f'<span class="technique-tooltip"><b style="color:#00D2FF">{term} · {info["en"]}</b>'
             f'<br><br>{info["desc"]}</span></span>')
 
-
-# ================================================================
-# 9.5 教育体验增强 - 知识卡片与发现日志
-# ================================================================
-
-# 知识库：专业术语解释
-KNOWLEDGE_BASE = {
-    "Jaccard指数": {
-        "short": "衡量集合相似度的指标",
-        "full": "Jaccard指数 = 两个集合的交集大小 / 并集大小。在风味科学中，表示两种食材共享香气分子的比例。指数越高，风味越相似。"
-    },
-    "Jaccard": {
-        "short": "集合相似度指标",
-        "full": "Jaccard相似系数是衡量两个集合相似度的统计指标，计算公式为交集大小除以并集大小。"
-    },
-    "双向覆盖率": {
-        "short": "双方共享分子的覆盖程度",
-        "full": "双向覆盖率 = min(共享分子覆盖A的比例, 共享分子覆盖B的比例)。防止大集合稀释问题，确保双方都有高覆盖才能高分。"
-    },
-    "脂溶性": {
-        "short": "易溶于油脂的特性",
-        "full": "香气分子易溶于油脂的特性。这类分子（如萜烯类）在油封、奶油烹调中更易释放。脂溶性分子通常具有木质、烟熏、奶油等香气特征。"
-    },
-    "水溶性": {
-        "short": "易溶于水的特性", 
-        "full": "香气分子易溶于水的特性。这类分子（如醛类、酯类）在水煮、清蒸中更易展现。水溶性分子通常具有果香、花香、清新等特征。"
-    },
-    "同源共振": {
-        "short": "共享大量相同分子的搭配",
-        "full": "两种食材含有大量相同芳香分子，组合后产生1+1>2的叠加效应。适合主从搭配，以一种强化另一种。典型例子：咖啡×可可、草莓×覆盆子。"
-    },
-    "对比碰撞": {
-        "short": "分子差异显著的搭配",
-        "full": "两种食材风味分子差异显著，产生强烈对比张力。适合少量点缀创造惊喜，高手用它制造「味觉转折」。典型例子：黑巧克力×辣椒、草莓×黑胡椒。"
-    },
-    "萜烯类": {
-        "short": "柑橘/草本香气的主要成分",
-        "full": "萜烯类化合物是植物中广泛存在的一类挥发性有机物，是柑橘、松木、花香、草本等香气的主要来源。具有脂溶性，在油脂中更易释放。"
-    },
-    "酯类": {
-        "short": "果香花香的主要来源",
-        "full": "酯类化合物是果香、花香、甜香的主要来源。乙酸乙酯等低分子酯具有典型的水果香气，在发酵和成熟过程中大量产生。"
-    },
-    "美拉德反应": {
-        "short": "高温下的褐变反应",
-        "full": "氨基酸与还原糖在高温下发生的复杂反应，产生数百种风味化合物，是烘焙、烧烤、煎炸香气的核心来源。"
-    },
-    "乳化": {
-        "short": "油水混合的技术",
-        "full": "将两种不相溶的液体（如油和水）通过乳化剂稳定结合，同时呈现脂溶性和水溶性风味分子，创造层次最丰富的口感。"
-    },
-}
-
-def render_knowledge_tooltip(term):
-    """渲染带tooltip的术语"""
-    knowledge = KNOWLEDGE_BASE.get(term)
-    if not knowledge:
-        return term
-    full_text = knowledge["full"].replace('"', '&quot;')
-    return f'<span class="knowledge-term" title="{full_text}">{term}<sup>?</sup></span>'
-
-def render_knowledge_badge(term):
-    """渲染知识徽章（带简短解释）"""
-    knowledge = KNOWLEDGE_BASE.get(term)
-    if not knowledge:
-        return term
-    full_text = knowledge["full"].replace('"', '&quot;')
-    return f'<span style="display:inline-flex;align-items:center;gap:4px;background:linear-gradient(135deg,#EEF6FF,#F5F3FF);border:1px solid #BDD7F5;border-radius:8px;padding:2px 8px;font-size:.75rem;color:#1D6FDB;cursor:help;" title="{full_text}">{term}<span style="color:#7C3AED;font-size:.65rem">{knowledge["short"]}</span></span>'
-
-# 发现日志功能
-def add_to_discovery_log(ingredients, resonance_score, pairing_type):
-    """添加记录到发现日志"""
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "ingredients": ingredients,
-        "resonance_score": resonance_score,
-        "pairing_type": pairing_type,
-        "user_notes": ""
-    }
-    st.session_state.discovery_log.append(entry)
-
-def render_discovery_log():
-    """渲染发现日志"""
-    if not st.session_state.discovery_log:
-        return
-
-    with st.expander(f"📔 我的风味发现日志 ({len(st.session_state.discovery_log)} 条)", expanded=False):
-        for i, entry in enumerate(reversed(st.session_state.discovery_log[-10:])):  # 只显示最近10条
-            ts = datetime.fromisoformat(entry["timestamp"]).strftime("%m/%d %H:%M")
-            ing_names = " × ".join([t_ingredient(ing) for ing in entry["ingredients"]])
-            score = entry["resonance_score"]
-            ptype = entry["pairing_type"]
-
-            type_colors = {
-                "resonance": ("#22C55E", "同源共振"),
-                "contrast": ("#EF4444", "对比碰撞"),
-                "neutral": ("#F97316", "平衡搭档")
-            }
-            color, label = type_colors.get(ptype, ("#6B7280", "未知"))
-
-            st.markdown(f"""
-            <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:12px;margin-bottom:8px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                    <span style="font-size:.75rem;color:var(--text-muted)">{ts}</span>
-                    <span style="background:{color}22;color:{color};font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:600">{label}</span>
-                </div>
-                <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px;">{ing_names}</div>
-                <div style="display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:1.2rem;font-weight:700;color:{color}">{score}</span>
-                    <span style="font-size:.7rem;color:var(--text-muted)">共鸣指数</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
 # ================================================================
 # 8. HTML 辅助
 # ================================================================
@@ -908,19 +743,8 @@ def md_to_html(text):
 #   • is_ai_thinking: 标志AI正在处理，渲染时显示loading，不重复触发
 #   • AI请求与消息记录在同一次执行中完成（非rerun），然后再rerun刷新UI
 # ================================================================
-def _do_ai_request_safe(user_content, context_str, msg_id):
-    """执行实际 AI 请求，带异常处理和状态保护
-
-    Args:
-        user_content: 用户消息内容
-        context_str: 上下文字符串
-        msg_id: 消息唯一ID，用于去重
-    """
-    # 检查是否已处理过（防止重复）
-    if msg_id in st.session_state.processed_message_ids:
-        return  # 重复消息，直接返回
-
-    st.session_state.processed_message_ids.add(msg_id)
+def _do_ai_request(user_content, context_str):
+    """执行实际 AI 请求，更新 chat_history，清理状态"""
     current_time = datetime.now().strftime("%H:%M")
 
     # 构建发送给 AI 的历史（只含正常消息，排除错误消息）
@@ -930,44 +754,24 @@ def _do_ai_request_safe(user_content, context_str, msg_id):
             msg_history.append({"role": msg["role"], "content": msg["content"]})
     msg_history.append({"role": "user", "content": user_content})
 
-    # 记录用户消息（带msg_id）
+    # 记录用户消息
     st.session_state.chat_history.append({
-        "role": "user", "content": user_content, "time": current_time, "msg_id": msg_id
+        "role": "user", "content": user_content, "time": current_time
     })
     st.session_state.last_api_error = None
 
-    try:
-        # 调用 AI
-        success, result, is_rate_limit = call_ai_api(msg_history, context_str)
+    # 调用 AI
+    success, result, is_rate_limit = call_ai_api(msg_history, context_str)
 
-        # 记录 AI 回复
-        st.session_state.chat_history.append({
-            "role": "assistant", 
-            "content": result, 
-            "is_error": not success,
-            "reply_to_msg_id": msg_id,
-            "time": current_time
-        })
+    # 记录 AI 回复
+    st.session_state.chat_history.append({
+        "role": "assistant", "content": result, "is_error": not success
+    })
 
-        if not success:
-            st.session_state.last_api_error = "频率限制，请稍后重试" if is_rate_limit else "API 调用失败"
+    if not success:
+        st.session_state.last_api_error = "频率限制，请稍后重试" if is_rate_limit else "API 调用失败"
 
-    except Exception as e:
-        # 捕获所有异常，确保状态不会死锁
-        error_msg = f"⚠️ 系统错误：{str(e)[:100]}"
-        st.session_state.chat_history.append({
-            "role": "assistant", 
-            "content": error_msg, 
-            "is_error": True,
-            "reply_to_msg_id": msg_id,
-            "time": current_time
-        })
-        st.session_state.last_api_error = "系统内部错误"
-    finally:
-        # 关键：无论成功与否，都释放思考锁
-        st.session_state.is_ai_thinking = False
-        st.session_state.thinking_started_at = None
-        st.session_state.pending_ai_message = None
+    # 注意：is_ai_thinking / pending 由调用方（render_chat_section）统一管理，此处不重置
 
 
 def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, df):
@@ -1032,37 +836,28 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
     thinking = st.session_state.get("is_ai_thinking", False)
     ts = st.session_state.get("thinking_started_at")
 
-    # 检测僵死：有锁但超过60秒 → 强制解锁（已在main()中处理，这里是双重保险）
+    # 检测僵死：有锁但超过60秒 → 强制解锁
     if thinking and ts and (time.time() - ts) > 60:
         st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
         st.session_state.pending_ai_message = None
         st.session_state.chat_history.append({
             "role": "assistant",
-            "content": "⏱️ **请求超时（60秒）** — 千问响应过慢。已自动重置，请重试。",
-            "is_error": True,
-            "time": datetime.now().strftime("%H:%M")
+            "content": "⏱️ **请求超时（60秒）** — 千问响应过慢。请重试，或在设置中确认使用 qwen-turbo。",
+            "is_error": True
         })
         st.rerun()
 
     # 正常触发：有 pending 且无锁
     elif pending and not thinking:
         msg_content = pending["content"]
-        msg_id = pending.get("id")  # 获取消息ID
-
-        if not msg_id:
-            # 如果没有ID，生成一个
-            msg_id = f"msg_{st.session_state.chat_message_id_counter}_{time.time()}"
-            st.session_state.chat_message_id_counter += 1
-
-        # 立即清空pending并加锁（防止重复触发）
-        st.session_state.pending_ai_message = None
-        st.session_state.is_ai_thinking = True
+        st.session_state.pending_ai_message = None   # 先清 pending
+        st.session_state.is_ai_thinking = True        # 再加锁
         st.session_state.thinking_started_at = time.time()
-
         with st.spinner("🧬 风味顾问思考中..."):
-            _do_ai_request_safe(msg_content, context_str, msg_id)
-        # 注意：_do_ai_request_safe 内部会处理解锁
+            _do_ai_request(msg_content, context_str)
+        st.session_state.is_ai_thinking = False       # 解锁
+        st.session_state.thinking_started_at = None
         st.rerun()
 
     # ── 渲染历史消息 ──
@@ -1109,35 +904,19 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         )
         if st.button("🔄 重试", key="retry_btn"):
             # 找最后一条用户消息重试
-            last_user_msg = None
             for msg in reversed(st.session_state.chat_history):
                 if msg["role"] == "user":
-                    last_user_msg = msg
+                    # 移除之前的错误回复
+                    st.session_state.chat_history = [
+                        m for m in st.session_state.chat_history
+                        if not (m["role"] == "assistant" and m.get("is_error", False))
+                    ]
+                    # 移除最后一条用户消息（会在_do_ai_request中重新添加）
+                    st.session_state.chat_history = st.session_state.chat_history[:-1]
+                    st.session_state.last_api_error = None
+                    st.session_state.pending_ai_message = {"content": msg["content"]}
+                    st.rerun()
                     break
-
-            if last_user_msg:
-                # 找到该用户消息对应的AI回复（如果有的话）
-                user_msg_id = last_user_msg.get("msg_id")
-
-                # 移除该用户消息及其之后的所有消息（包括错误回复）
-                new_history = []
-                for msg in st.session_state.chat_history:
-                    if msg["role"] == "user" and msg.get("msg_id") == user_msg_id:
-                        # 找到目标用户消息，停止添加
-                        break
-                    new_history.append(msg)
-
-                st.session_state.chat_history = new_history
-                st.session_state.last_api_error = None
-
-                # 生成新的消息ID并设置pending
-                new_msg_id = f"msg_{st.session_state.chat_message_id_counter}_{time.time()}"
-                st.session_state.chat_message_id_counter += 1
-                st.session_state.pending_ai_message = {
-                    "content": last_user_msg["content"],
-                    "id": new_msg_id
-                }
-                st.rerun()
 
     # ── 快捷问题按钮（⚠️ 只设置 pending，不直接调用 AI）──
     st.markdown("<div style='margin: 16px 0 8px;font-size:.85rem;color:var(--text-muted);'>💡 快捷问题：</div>",
@@ -1159,10 +938,7 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         if qcols[qi].button(q, key=btn_key, use_container_width=True, disabled=already_pending):
             # 二次检查：只有当前没有任何待处理消息才设置
             if not st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
-                # 生成唯一消息ID
-                msg_id = f"msg_{st.session_state.chat_message_id_counter}_{time.time()}"
-                st.session_state.chat_message_id_counter += 1
-                st.session_state.pending_ai_message = {"content": q, "id": msg_id}
+                st.session_state.pending_ai_message = {"content": q}
                 st.rerun()
 
     # ── 文本输入 + 发送 ──
@@ -1187,10 +963,7 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         if send_clicked and user_input.strip():
             # 防重复：只有没有待处理消息时才设置
             if not st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
-                # 生成唯一消息ID
-                msg_id = f"msg_{st.session_state.chat_message_id_counter}_{time.time()}"
-                st.session_state.chat_message_id_counter += 1
-                st.session_state.pending_ai_message = {"content": user_input.strip(), "id": msg_id}
+                st.session_state.pending_ai_message = {"content": user_input.strip()}
                 st.rerun()
 
     with col_clear:
@@ -1336,41 +1109,21 @@ def render_experiment_tab(df):
     with rand_col1:
         if st.button("🟢 经典共振搭配", key="random_resonance", use_container_width=True):
             pair = try_classic(CLASSIC_RESONANCE_PAIRS)
-            if pair:
-                st.session_state["_pending_selection"] = {
-                    "ingredients": [pair[0], pair[1]],
-                    "description": f"🟢 {pair[2]}",
-                    "tab": "实验台"
-                }
-            else:
-                # 随机选择回退
-                picked = random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else []
-                if picked:
-                    st.session_state["_pending_selection"] = {
-                        "ingredients": picked,
-                        "description": "",
-                        "tab": "实验台"
-                    }
+            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else [])
+            if picked:
+                st.session_state["_force_defaults"] = picked
+                st.session_state["selected_ingredients"] = picked
+                st.session_state["_random_desc"] = f"🟢 {pair[2]}" if pair else ""
             st.rerun()
 
     with rand_col2:
         if st.button("🔴 经典对比碰撞", key="random_contrast", use_container_width=True):
             pair = try_classic(CLASSIC_CONTRAST_PAIRS)
-            if pair:
-                st.session_state["_pending_selection"] = {
-                    "ingredients": [pair[0], pair[1]],
-                    "description": f"🔴 {pair[2]}",
-                    "tab": "实验台"
-                }
-            else:
-                # 随机选择回退
-                picked = random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else []
-                if picked:
-                    st.session_state["_pending_selection"] = {
-                        "ingredients": picked,
-                        "description": "",
-                        "tab": "实验台"
-                    }
+            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else [])
+            if picked:
+                st.session_state["_force_defaults"] = picked
+                st.session_state["selected_ingredients"] = picked
+                st.session_state["_random_desc"] = f"🔴 {pair[2]}" if pair else ""
             st.rerun()
 
     # 显示经典配对的描述
@@ -1380,14 +1133,13 @@ def render_experiment_tab(df):
     options = sorted(df_show["name"].unique().tolist())
     options_set = set(options)
 
-    # 优先级：_pending_ingredient_list(加入实验) > selected_ingredients(持久化) > 空
-    # 注意：_pending_selection 在 main() 中统一处理，不在此处处理
-    pending_list = st.session_state.pop("_pending_ingredient_list", None)
+    # 优先级：_force_defaults(随机/示例) > selected_ingredients(持久化) > 空
+    force = st.session_state.pop("_force_defaults", None)
     st.session_state.pop("random_selection", None)        # 兼容旧代码，清除避免干扰
-    st.session_state.pop("_force_defaults", None)         # 清除旧状态
+    st.session_state.pop("_pending_ingredient_list", None)
 
-    if pending_list:
-        defaults = [n for n in pending_list if n in options_set]
+    if force:
+        defaults = [n for n in force if n in options_set]
     else:
         defaults = [n for n in st.session_state.get("selected_ingredients", []) if n in options_set]
 
@@ -1656,11 +1408,9 @@ def render_empty_state(df):
             if pair:
                 btn_label = f"{icon} 开始体验 {cna} × {cnb}"
                 if st.button(btn_label, key=btn_key, use_container_width=True):
-                    st.session_state["_pending_selection"] = {
-                        "ingredients": [pa, pb],
-                        "description": "",
-                        "tab": "实验台"
-                    }
+                    st.session_state["_force_defaults"] = [pa, pb]
+                    st.session_state["selected_ingredients"] = [pa, pb]
+                    st.session_state["sidebar_tab"] = "实验台"
                     st.rerun()
             else:
                 st.button("暂无匹配食材", key=btn_key, use_container_width=True, disabled=True)
@@ -1698,48 +1448,14 @@ def main():
         st.error("❌ 找不到 flavordb_data.csv，请确保数据文件在同一目录下")
         st.stop()
 
-    # ================================================================
-    # 全局状态检查与修复
-    # ================================================================
-
-    # 1. 处理待处理的食材选择（来自按钮点击/示例卡片）
-    if "_pending_selection" in st.session_state:
-        pending = st.session_state.pop("_pending_selection")
-        selected = pending.get("ingredients", [])
-        # 验证食材是否在当前数据集中
-        valid_selected = [s for s in selected if s in df["name"].values]
-        if len(valid_selected) >= 2:
-            st.session_state["selected_ingredients"] = valid_selected
-            st.session_state["_random_desc"] = pending.get("description", "")
-            st.session_state.sidebar_tab = pending.get("tab", "实验台")
-        else:
-            st.toast("所选食材不在当前筛选范围内，请调整筛选条件", icon="⚠️")
-        st.rerun()
-        return
-
-    # 2. 处理"加入实验"的食材更新
+    # ⚠️ 问题1修复：在渲染任何widget之前，先处理"加入实验"的食材更新
+    # 不能在widget渲染循环中直接赋值widget的key，必须在rerun后、widget创建前处理
     if "_add_ingredient" in st.session_state:
         new_list = st.session_state.pop("_add_ingredient")
         st.session_state["_pending_ingredient_list"] = new_list
     if "_add_warn" in st.session_state:
         del st.session_state["_add_warn"]
         st.warning("⚠️ 最多支持4种食材")
-
-    # 3. AI 思考状态超时检查（60秒自动重置）
-    if st.session_state.get("is_ai_thinking"):
-        start_time = st.session_state.get("thinking_started_at", 0)
-        if time.time() - start_time > 60:
-            st.session_state.is_ai_thinking = False
-            st.session_state.thinking_started_at = None
-            st.session_state.pending_ai_message = None
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": "⏱️ **请求超时（60秒）** — 千问响应过慢。已自动重置，请重试。",
-                "is_error": True,
-                "time": datetime.now().strftime("%H:%M")
-            })
-            st.rerun()
-            return
 
     # Hero
     _, btn_col = st.columns([9, 1])
@@ -1914,51 +1630,6 @@ def main():
             比例：{cn1} <b style="color:rgba(255,255,255,.65)">{rr1}%</b> &nbsp;·&nbsp; {cn2} <b style="color:rgba(255,255,255,.65)">{rr2}%</b>
           </div>
         </div>""", unsafe_allow_html=True)
-
-        # 添加"为什么"展开项
-        with st.expander("🔬 为什么它们产生" + ("共振" if sim["type"]=="resonance" else ("对比" if sim["type"]=="contrast" else "平衡")) + "？", expanded=False):
-            shared_top = sim["shared"][:5]
-            shared_str = ", ".join([t_note(n) for n in shared_top]) if shared_top else "无"
-
-            if sim["type"] == "resonance":
-                st.markdown(f"""
-                **分子层面解释**：  
-                {cn1} 和 {cn2} 共享 **{len(sim["shared"])}** 种芳香分子，主要包括：{shared_str}  
-
-                这些分子属于 **萜烯类** 和 **酯类** 化合物家族，具有相似的化学结构。
-                当它们结合时，嗅觉受体激活阈值降低，产生**协同效应**，使整体香气比单独存在时更强。
-                """)
-            elif sim["type"] == "contrast":
-                only_a_str = ", ".join([t_note(n) for n in sim["only_a"][:3]]) if sim["only_a"] else "无"
-                only_b_str = ", ".join([t_note(n) for n in sim["only_b"][:3]]) if sim["only_b"] else "无"
-                st.markdown(f"""
-                **分子层面解释**：  
-                {cn1} 和 {cn2} 只有 **{len(sim["shared"])}** 种共享分子，但各自拥有独特的风味特征：
-                - {cn1} 独有：{only_a_str}
-                - {cn2} 独有：{only_b_str}
-
-                这种**差异性**在口腔中创造味觉节奏——先感受一种风味，再被另一种"切割"，形成层次分明的体验。
-                """)
-            else:
-                st.markdown(f"""
-                **分子层面解释**：  
-                {cn1} 和 {cn2} 有适度的分子交叠（{len(sim["shared"])} 种），同时保持各自的独特性。
-
-                这种**平衡结构**使它们既能相互补充，又不会互相掩盖，是最适合进行比例实验的搭配类型。
-                """)
-
-            st.markdown(f"""
-            <div style="font-size:.75rem;color:var(--text-muted);margin-top:8px;padding-top:8px;border-top:1px solid var(--border-color);">
-            💡 <b>烹饪应用</b>：{tier_guide}
-            </div>
-            """, unsafe_allow_html=True)
-
-        # 添加保存到发现日志按钮
-        log_cols = st.columns([3, 1])
-        with log_cols[1]:
-            if st.button("💾 保存到日志", key="save_discovery_btn", use_container_width=True):
-                add_to_discovery_log(selected[:2], sim["score"], sim["type"])
-                st.toast("✅ 已保存到您的风味发现日志", icon="📔")
 
         st.markdown('<div class="card"><h4 class="card-title">🧪 风味指纹</h4>', unsafe_allow_html=True)
         for i, name in enumerate(selected):
@@ -2205,9 +1876,6 @@ def main():
         else:
             st.info("未找到合适的对比食材")
         st.markdown("</div>", unsafe_allow_html=True)
-
-    # 发现日志（如果有记录）
-    render_discovery_log()
 
     # AI 对话区
     api_ok, api_config = check_api_status()
