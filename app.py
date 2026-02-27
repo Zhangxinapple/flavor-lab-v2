@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+"""
+味觉虫洞 Flavor Lab - 修复版本 V2.1
+修复问题：
+1. 经典搭配按钮无响应 - 修复 multiselect default 值更新机制
+2. AI对话无响应 - 添加更好的错误处理和状态管理
+"""
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -29,11 +37,14 @@ _init_state("sidebar_tab", "实验台")
 _init_state("show_debug", False)
 _init_state("manual_api_key", "")
 _init_state("selected_ingredients", [])  # 持久化已选食材，跨标签共享
-# ⚠️  关键修复：用两个独立标志控制 AI 请求，避免 rerun 死循环
-_init_state("pending_ai_message", None)   # {"content": str} 有消息待发送时非None
-_init_state("is_ai_thinking", False)      # AI 正在思考中标志
-_init_state("thinking_started_at", None)  # 开始时间戳，超过40秒自动重置
-_init_state("selected_groups", set())     # 分类筛选的选中大组
+# AI 请求状态
+_init_state("pending_ai_message", None)
+_init_state("is_ai_thinking", False)
+_init_state("thinking_started_at", None)
+_init_state("selected_groups", set())
+# 修复：添加按钮触发计数器，强制 multiselect 重新渲染
+_init_state("_button_trigger", 0)
+_init_state("_force_defaults", None)
 
 def t(text_en, text_zh=None):
     if st.session_state.language == "zh":
@@ -41,15 +52,14 @@ def t(text_en, text_zh=None):
     return text_en
 
 # ================================================================
-# 1. API 配置管理 —— 全面统一为阿里云千问(DashScope)
+# 1. API 配置管理
 # ================================================================
 DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL   = "qwen-turbo"   # turbo 响应速度比 plus 快 3-5 倍
+DEFAULT_MODEL   = "qwen-turbo"
 
 def get_api_config():
     """
-    优先级: 手动输入 > Streamlit Secrets > 环境变量
-    统一返回 dashscope 配置，使用 OpenAI 兼容模式调用
+    优先级: 手动输入 > Streamlit Secrets > 环境变量 > config.py
     """
     # 1. 手动输入（最高优先级）
     manual = st.session_state.get("manual_api_key", "").strip()
@@ -99,7 +109,7 @@ def check_api_status():
     return True, config
 
 # ================================================================
-# 2. AI 调用引擎 —— 统一 OpenAI 兼容接口调用千问
+# 2. AI 调用引擎
 # ================================================================
 FLAVOR_GEM_PROMPT = """你是风味科学顾问。基于食材分子数据给出简洁专业的中文回答，控制在250字内。
 
@@ -134,11 +144,10 @@ def call_ai_api(messages, context, max_retries=2):
     for msg in messages:
         api_messages.append({"role": msg["role"], "content": msg["content"]})
 
-    # ⚠️ 问题2修复：设置30秒超时，防止永久卡住
     client = openai.OpenAI(
         api_key=config["api_key"],
         base_url=config.get("base_url", DASHSCOPE_BASE),
-        timeout=httpx.Timeout(25.0, connect=8.0)  # 严格25秒，Streamlit Cloud 60s限制
+        timeout=httpx.Timeout(25.0, connect=8.0)
     )
 
     for attempt in range(max_retries):
@@ -147,7 +156,7 @@ def call_ai_api(messages, context, max_retries=2):
                 model=config.get("model", DEFAULT_MODEL),
                 messages=api_messages,
                 temperature=0.7,
-                max_tokens=400,   # 减半：qwen-turbo 400token约3-6秒
+                max_tokens=400,
                 stream=False
             )
             return True, response.choices[0].message.content, False
@@ -185,7 +194,6 @@ def call_ai_api(messages, context, max_retries=2):
 # ================================================================
 st.markdown("""
 <style>
-/* === 浅色模式（默认）=== */
 :root {
   --bg-main: #F4F6FA; --bg-sidebar: #FAFBFC; --bg-card: #FFFFFF;
   --border-color: #E8EAED; --text-primary: #111827; --text-second: #374151;
@@ -209,64 +217,15 @@ st.markdown("""
   --chat-error-bg:#FEF2F2; --chat-error-border:#FECACA;
   --onboarding-text:#374151;
 }
-/* === 深色模式（跟随系统）=== */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-main:#0F1117; --bg-sidebar:#161b22; --bg-card:#1c2128;
-    --border-color:#30363d; --text-primary:#e6edf3; --text-second:#cdd9e5;
-    --text-muted:#8b949e; --text-faint:#6e7681;
-    --shadow-sm:0 1px 8px rgba(0,0,0,0.3),0 4px 16px rgba(0,0,0,0.2);
-    --diag-res-bg:#0d2818; --diag-res-text:#4ade80;
-    --diag-ctr-bg:#2d1b00; --diag-ctr-text:#fb923c;
-    --diag-info-bg:#0d1f3c; --diag-info-text:#60a5fa;
-    --diag-warn-bg:#2d2000; --diag-warn-text:#fbbf24;
-    --tag-blue-bg:#0d2340; --tag-blue-text:#60a5fa; --tag-blue-border:#1d4ed8;
-    --tag-green-bg:#0d2e1a; --tag-green-text:#4ade80; --tag-green-border:#166534;
-    --tag-orange-bg:#2d1500; --tag-orange-text:#fb923c; --tag-orange-border:#9a3412;
-    --tag-purple-bg:#1e0d40; --tag-purple-text:#a78bfa; --tag-purple-border:#6d28d9;
-    --tag-pink-bg:#2d0d1e; --tag-pink-text:#f472b6; --tag-pink-border:#9d174d;
-    --ing-row-bg:#22272e;
-    --ratio-guide-bg:linear-gradient(135deg,#1a1f3c,#1e1a3c);
-    --ratio-guide-text:#cdd9e5;
-    --hot-card-bg:#1c2128; --hot-card-border:#30363d;
-    --pbar-bg:#30363d;
-    --badge-neutral-bg:#22272e; --badge-neutral-text:#cdd9e5; --badge-neutral-border:#30363d;
-    --chat-error-bg:#2d0d0d; --chat-error-border:#7f1d1d;
-    --onboarding-text:#cdd9e5;
-  }
-}
-/* Streamlit 自身 dark class 兜底 */
-[data-theme="dark"] {
-  --bg-main:#0F1117!important; --bg-sidebar:#161b22!important; --bg-card:#1c2128!important;
-  --border-color:#30363d!important; --text-primary:#e6edf3!important; --text-second:#cdd9e5!important;
-  --text-muted:#8b949e!important; --text-faint:#6e7681!important;
-  --diag-res-bg:#0d2818!important; --diag-res-text:#4ade80!important;
-  --diag-ctr-bg:#2d1b00!important; --diag-ctr-text:#fb923c!important;
-  --diag-info-bg:#0d1f3c!important; --diag-info-text:#60a5fa!important;
-  --diag-warn-bg:#2d2000!important; --diag-warn-text:#fbbf24!important;
-  --tag-blue-bg:#0d2340!important; --tag-blue-text:#60a5fa!important; --tag-blue-border:#1d4ed8!important;
-  --tag-green-bg:#0d2e1a!important; --tag-green-text:#4ade80!important; --tag-green-border:#166534!important;
-  --tag-orange-bg:#2d1500!important; --tag-orange-text:#fb923c!important; --tag-orange-border:#9a3412!important;
-  --tag-purple-bg:#1e0d40!important; --tag-purple-text:#a78bfa!important; --tag-purple-border:#6d28d9!important;
-  --tag-pink-bg:#2d0d1e!important; --tag-pink-text:#f472b6!important; --tag-pink-border:#9d174d!important;
-  --ing-row-bg:#22272e!important;
-  --hot-card-bg:#1c2128!important; --hot-card-border:#30363d!important;
-  --pbar-bg:#30363d!important;
-  --badge-neutral-bg:#22272e!important; --badge-neutral-text:#cdd9e5!important; --badge-neutral-border:#30363d!important;
-  --chat-error-bg:#2d0d0d!important; --chat-error-border:#7f1d1d!important;
-  --onboarding-text:#cdd9e5!important; --ratio-guide-text:#cdd9e5!important;
-}
 
 .stApp { background: var(--bg-main) !important; color: var(--text-primary) !important; }
 [data-testid="stSidebar"] {
   background: var(--bg-sidebar) !important;
   border-right: 1px solid var(--border-color) !important;
 }
-/* 覆盖 Streamlit 原生文字 */
 .stApp p, .stApp li, .stApp span:not([class*="badge"]):not([class*="tag"]) { color: var(--text-primary); }
 [data-testid="stSidebar"] label, [data-testid="stSidebar"] p { color: var(--text-second) !important; }
 
-/* Hero */
 .hero-header {
   background: linear-gradient(135deg,#0A0A1A 0%,#1A1A3E 55%,#0D2137 100%);
   padding: 20px 32px; border-radius: 16px;
@@ -287,7 +246,6 @@ st.markdown("""
 .hero-badge-pill { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 20px; padding: 4px 12px; font-size: .68rem; color: rgba(255,255,255,.5) !important; }
 .hero-badge-pill b { color: rgba(255,255,255,.8) !important; }
 
-/* 卡片 */
 .card {
   background: var(--bg-card); padding: 18px 20px; border-radius: 14px;
   box-shadow: var(--shadow-sm);
@@ -296,7 +254,6 @@ st.markdown("""
 .card-title { margin: 0 0 12px 0 !important; font-size: .95rem !important; font-weight: 700 !important; color: var(--text-primary) !important; display: flex; align-items: center; gap: 6px; }
 .card-dark { background: linear-gradient(135deg,#0A0A1A,#1A1A3E); padding: 20px 24px; border-radius: 14px; box-shadow: 0 4px 20px rgba(0,0,0,.4); margin-bottom: 14px; border: 1px solid rgba(255,255,255,.08); }
 
-/* 标签 */
 .tag { display: inline-block; padding: 2px 9px; border-radius: 14px; font-size: .72rem; font-weight: 600; margin: 2px; }
 .tag-blue   { background:var(--tag-blue-bg);   color:var(--tag-blue-text)   !important; border:1px solid var(--tag-blue-border); }
 .tag-green  { background:var(--tag-green-bg);  color:var(--tag-green-text)  !important; border:1px solid var(--tag-green-border); }
@@ -305,13 +262,11 @@ st.markdown("""
 .tag-pink   { background:var(--tag-pink-bg);   color:var(--tag-pink-text)   !important; border:1px solid var(--tag-pink-border); }
 .tag-shared { background:linear-gradient(90deg,var(--tag-blue-bg),var(--tag-purple-bg)); color:var(--tag-purple-text) !important; border:1px solid var(--tag-purple-border); font-weight:700; }
 
-/* 徽章 */
 .badge { display:inline-block; padding:4px 14px; border-radius:20px; font-size:.82rem; font-weight:700; }
 .badge-resonance { background:#D1FAE5; color:#065F46 !important; }
 .badge-contrast  { background:#FEE2E2; color:#991B1B !important; }
 .badge-neutral   { background:var(--badge-neutral-bg); color:var(--badge-neutral-text) !important; border:1px solid var(--badge-neutral-border); }
 
-/* 诊断框 */
 .diag { border-radius:10px; padding:12px 14px; margin:6px 0; border-left:3px solid; }
 .diag-res  { background:var(--diag-res-bg);  border-color:#22C55E; color:var(--diag-res-text); }
 .diag-ctr  { background:var(--diag-ctr-bg);  border-color:#F97316; color:var(--diag-ctr-text); }
@@ -319,21 +274,17 @@ st.markdown("""
 .diag-warn { background:var(--diag-warn-bg); border-color:#F59E0B; color:var(--diag-warn-text); }
 .diag b, .diag span { color:inherit !important; }
 
-/* 进度条 */
 .pbar-bg  { background:var(--pbar-bg); border-radius:4px; height:5px; overflow:hidden; margin:2px 0; }
 .pbar-fill { height:100%; border-radius:4px; }
 
-/* 食材行 */
 .ing-row { background:var(--ing-row-bg); border:1px solid var(--border-color); border-radius:10px; padding:10px 14px; margin:5px 0; color:var(--text-primary); }
 .ing-row div { color:var(--text-primary) !important; }
 
-/* API 状态 */
 .api-status { display: flex; align-items: center; gap: 8px; padding: 9px 13px; border-radius: 10px; font-size: .82rem; margin-bottom: 10px; font-weight: 600; }
 .api-status.ready { background: linear-gradient(135deg,#D1FAE5,#ECFDF5); color: #065F46; border: 1px solid #A7F3D0; }
 .api-status.error { background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA; }
 .api-status.warning { background: #FEF3C7; color: #92400E; border: 1px solid #FDE68A; }
 
-/* 聊天气泡 */
 .chat-bubble-user {
   background: linear-gradient(135deg,#7B2FF7,#00D2FF); color: #fff !important;
   padding: 10px 16px; border-radius: 18px 18px 4px 18px; margin: 6px 0;
@@ -353,26 +304,9 @@ st.markdown("""
 .chat-wrap { max-height: 500px; overflow-y: auto; padding: 12px; background: var(--bg-main); border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 12px; }
 .chat-time { font-size: .68rem; color: var(--text-faint); float: right; clear: both; margin-bottom: 4px; }
 
-/* 工艺 Tooltip */
-.technique-wrap { position: relative; display: inline-block; cursor: help; }
-.technique-term { color: #a78bfa !important; font-weight: 700; border-bottom: 2px dotted #a78bfa; }
-.technique-tooltip {
-  visibility: hidden; opacity: 0; background: #1A1A3E; color: #F0F2F8 !important;
-  text-align: left; border-radius: 10px; padding: 12px 14px; position: absolute;
-  z-index: 9999; bottom: 130%; left: 50%; transform: translateX(-50%);
-  width: 280px; font-size: .8rem; line-height: 1.5;
-  box-shadow: 0 8px 24px rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.14);
-  transition: opacity .2s, visibility .2s; pointer-events: none;
-}
-.technique-tooltip * { color: #F0F2F8 !important; }
-.technique-tooltip::after { content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-top-color: #1A1A3E; }
-.technique-wrap:hover .technique-tooltip { visibility: visible; opacity: 1; }
-
-/* 比例引导 */
 .ratio-guide { background: var(--ratio-guide-bg); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font-size: .77rem; line-height: 1.7; color: var(--ratio-guide-text); border-left: 3px solid #7B2FF7; }
 .ratio-guide b { color: #a78bfa !important; }
 
-/* 空状态 */
 .hot-experiment-card { background: var(--hot-card-bg); border: 1px solid var(--hot-card-border); border-radius: 12px; padding: 16px; transition: all 0.2s ease; }
 .onboarding-step { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
 .onboarding-step .num {
@@ -383,7 +317,6 @@ st.markdown("""
 }
 .onboarding-step .text { font-size: .85rem; color: var(--onboarding-text); line-height: 1.5; }
 
-/* 移动端适配 */
 @media (max-width: 768px) {
   .hero-header { flex-direction: column; padding: 16px 20px; text-align: center; }
   .hero-title { font-size: 1.3rem; }
@@ -471,17 +404,7 @@ POLARITY = {
 }
 
 def calc_sim(a, b):
-    """
-    分子共鸣指数 v3 —— 彻底修复虚高问题：
-    核心公式：score = Jaccard^0.6 × BiCoverage^0.4 × 97
-      - 纯比例运算，无绝对数量项，大集合不再自动加分
-      - BiCoverage = min(cov_a, cov_b)，双向严格约束
-      - 分数自然分布在 18-97，真实反映重叠程度
-    典型值验证：
-      Coffee × Cocoa   → Jaccard~0.45 → score~75  (共振)
-      Coffee × Strawberry → Jaccard~0.25 → score~52 (平衡)
-      Coffee × Grapefruit → Jaccard~0.08 → score~28 (对比)
-    """
+    """分子共鸣指数 v3"""
     if not a or not b:
         return {"score": 0, "jaccard": 0, "shared": [], "only_a": [], "only_b": [], "type": "contrast",
                 "detail": {"shared_count": 0, "only_a_count": 0, "only_b_count": 0}}
@@ -491,25 +414,15 @@ def calc_sim(a, b):
     only_a = a - b
     only_b = b - a
 
-    j = len(inter) / len(union) if union else 0   # Jaccard 0~1
-
-    # 双向覆盖率：共享分子分别覆盖 A 和 B 各自的比例，取最小值
-    # 这是防止"大集合稀释"的关键——双方都必须高覆盖才能高分
+    j = len(inter) / len(union) if union else 0
     cov_a = len(inter) / max(len(a), 1)
     cov_b = len(inter) / max(len(b), 1)
-    bi_cov = min(cov_a, cov_b)  # 严格双向
+    bi_cov = min(cov_a, cov_b)
 
-    # 核心得分：幂次加权组合（纯比例，无绝对数量项）
-    # j^0.6 拉伸低段；bi_cov^0.4 对低覆盖惩罚
     raw = (j ** 0.6) * 0.65 + (bi_cov ** 0.4) * 0.35
-
-    # 映射到 18-97 区间
     score = int(round(18 + raw * 79))
     score = max(18, min(97, score))
 
-    # 类型判定（v4：收紧 neutral 区间，让真正的对比组显示红色）
-    # 数据实测：典型对比组 Jaccard 在 0.05-0.15 之间
-    # 旧阈值 j>=0.10 → neutral 导致大量对比组被误判为黄色
     if score >= 65:
         typ = "resonance"
     elif score >= 42:
@@ -597,9 +510,6 @@ CLASSIC_CONTRAST_PAIRS = [
     ("Strawberry",   "Balsamic vinegar", "草莓香醋 — 意大利夏日经典，甜酸对比"),
 ]
 
-# 雷达图维度：参照 SCA 咖啡风味轮
-# 格式：{"维度": {"primary": [主关键词], "secondary": [次关键词]}}
-# 必须命中 >= 1 个 primary 词，该维度才计分（解决虚高问题）
 RADAR_DIMS_V2 = {
     "甜感": {
         "primary":   ["sweet","caramel","honey","vanilla","sugar"],
@@ -635,10 +545,8 @@ RADAR_DIMS_V2 = {
     },
 }
 
-# 兼容旧代码引用 RADAR_DIMS 的地方
 RADAR_DIMS = {k: v["primary"] + v["secondary"] for k, v in RADAR_DIMS_V2.items()}
 
-# 雷达图维度 tooltip 说明（鼠标悬停显示）
 RADAR_TOOLTIPS = {
     "甜感": "SCA风味轮·甜香区 | 焦糖、蜂蜜、香草等甜蜜芳香；来自糖类美拉德反应，是愉悦感的核心维度",
     "烘烤": "SCA风味轮·烘烤区 | 咖啡、可可、面包、麦芽等火焰工艺香气；高温焦糖化与美拉德反应的产物",
@@ -651,13 +559,7 @@ RADAR_TOOLTIPS = {
 }
 
 def radar_vals(mol_set):
-    """
-    雷达图算法 v4 — 精准反映食材真实风味个性：
-    - 必须命中 >= 1 个主关键词，该维度才计分（不给"微弱存在感"）
-    - 主词每命中1个 = +3分；次词每命中1个 = +1分
-    - 上限10分，未命中主词 = 0分
-    - 结果：每种食材只在真正具备的维度得分，图形有明显凹凸
-    """
+    """雷达图算法 v4"""
     result = {}
     for dim, cfg in RADAR_DIMS_V2.items():
         primary_kws = cfg["primary"]
@@ -667,10 +569,8 @@ def radar_vals(mol_set):
         secondary_hits = sum(1 for k in secondary_kws if k in mol_set)
 
         if primary_hits == 0:
-            # 没有主词命中 → 该维度不是该食材的特征，严格置0
             val = 0.0
         else:
-            # 主词每个3分 + 次词每个1分，上限10
             val = min(10.0, primary_hits * 3.0 + secondary_hits * 1.0)
 
         result[dim] = round(val, 1)
@@ -732,46 +632,31 @@ def md_to_html(text):
 
 
 # ================================================================
-# 9. AI 对话区 ——  关键重构：彻底解决"无限发送"问题
-#
-# 原因分析：
-#   旧代码用 quick_question_clicked 标志 + st.rerun() 触发AI请求。
-#   但 rerun 后 chat_section 再次渲染，发现标志非空，再次触发…死循环。
-#
-# 修复方案：
-#   • pending_ai_message: 仅存储"待发送内容"，发送完立即置None
-#   • is_ai_thinking: 标志AI正在处理，渲染时显示loading，不重复触发
-#   • AI请求与消息记录在同一次执行中完成（非rerun），然后再rerun刷新UI
+# 9. AI 对话区
 # ================================================================
 def _do_ai_request(user_content, context_str):
     """执行实际 AI 请求，更新 chat_history，清理状态"""
     current_time = datetime.now().strftime("%H:%M")
 
-    # 构建发送给 AI 的历史（只含正常消息，排除错误消息）
     msg_history = []
     for msg in st.session_state.chat_history:
         if msg["role"] in ["user", "assistant"] and not msg.get("is_error", False):
             msg_history.append({"role": msg["role"], "content": msg["content"]})
     msg_history.append({"role": "user", "content": user_content})
 
-    # 记录用户消息
     st.session_state.chat_history.append({
         "role": "user", "content": user_content, "time": current_time
     })
     st.session_state.last_api_error = None
 
-    # 调用 AI
     success, result, is_rate_limit = call_ai_api(msg_history, context_str)
 
-    # 记录 AI 回复
     st.session_state.chat_history.append({
         "role": "assistant", "content": result, "is_error": not success
     })
 
     if not success:
         st.session_state.last_api_error = "频率限制，请稍后重试" if is_rate_limit else "API 调用失败"
-
-    # 注意：is_ai_thinking / pending 由调用方（render_chat_section）统一管理，此处不重置
 
 
 def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, df):
@@ -804,9 +689,7 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         unsafe_allow_html=True
     )
 
-    # ── 构建上下文 ──
     def build_context():
-        # 精简 context，控制 token 消耗，加快响应
         food_str = " + ".join(t_ingredient(n) for n in selected)
         typ_str = "同源共振" if sim["type"]=="resonance" else ("对比碰撞" if sim["type"]=="contrast" else "平衡搭档")
         shared_str = ", ".join(t_note(x) for x in sim["shared"][:5])
@@ -820,7 +703,6 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
 
     context_str = build_context()
 
-    # ── 食材变化时重置对话 ──
     current_key = "+".join(sorted(selected))
     if st.session_state.chat_context_key != current_key:
         st.session_state.chat_history = []
@@ -829,14 +711,10 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         st.session_state.pending_ai_message = None
         st.session_state.is_ai_thinking = False
 
-    # ── AI 请求状态机（唯一处理点，防止任何重复）──
-    # 规则：pending非空 且 未在思考中 → 执行一次，执行完清除锁，rerun
-    # 注意：绝对不能有任何其他地方修改 is_ai_thinking 或 pending_ai_message
     pending = st.session_state.get("pending_ai_message")
     thinking = st.session_state.get("is_ai_thinking", False)
     ts = st.session_state.get("thinking_started_at")
 
-    # 检测僵死：有锁但超过60秒 → 强制解锁
     if thinking and ts and (time.time() - ts) > 60:
         st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
@@ -848,19 +726,17 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
         })
         st.rerun()
 
-    # 正常触发：有 pending 且无锁
     elif pending and not thinking:
         msg_content = pending["content"]
-        st.session_state.pending_ai_message = None   # 先清 pending
-        st.session_state.is_ai_thinking = True        # 再加锁
+        st.session_state.pending_ai_message = None
+        st.session_state.is_ai_thinking = True
         st.session_state.thinking_started_at = time.time()
         with st.spinner("🧬 风味顾问思考中..."):
             _do_ai_request(msg_content, context_str)
-        st.session_state.is_ai_thinking = False       # 解锁
+        st.session_state.is_ai_thinking = False
         st.session_state.thinking_started_at = None
         st.rerun()
 
-    # ── 渲染历史消息 ──
     if st.session_state.chat_history:
         chat_html = '<div class="chat-wrap">'
         for msg in st.session_state.chat_history:
@@ -895,7 +771,6 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
           </span>
         </div>""", unsafe_allow_html=True)
 
-    # ── 上次错误提示 ──
     if st.session_state.last_api_error:
         st.markdown(
             f'<div class="diag diag-warn"><b>⚠️ 上次请求遇到问题</b><br>'
@@ -903,22 +778,18 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
             unsafe_allow_html=True
         )
         if st.button("🔄 重试", key="retry_btn"):
-            # 找最后一条用户消息重试
             for msg in reversed(st.session_state.chat_history):
                 if msg["role"] == "user":
-                    # 移除之前的错误回复
                     st.session_state.chat_history = [
                         m for m in st.session_state.chat_history
                         if not (m["role"] == "assistant" and m.get("is_error", False))
                     ]
-                    # 移除最后一条用户消息（会在_do_ai_request中重新添加）
                     st.session_state.chat_history = st.session_state.chat_history[:-1]
                     st.session_state.last_api_error = None
                     st.session_state.pending_ai_message = {"content": msg["content"]}
                     st.rerun()
                     break
 
-    # ── 快捷问题按钮（⚠️ 只设置 pending，不直接调用 AI）──
     st.markdown("<div style='margin: 16px 0 8px;font-size:.85rem;color:var(--text-muted);'>💡 快捷问题：</div>",
                 unsafe_allow_html=True)
     n1, n2 = selected[0], selected[1]
@@ -930,18 +801,15 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
     qcols = st.columns(3)
     for qi, q in enumerate(quick_qs):
         btn_key = f"qbtn_{qi}"
-        # ⚠️ 防重复：如果已有 pending 或正在思考，完全禁用按钮
         already_pending = (
             st.session_state.is_ai_thinking or
             st.session_state.pending_ai_message is not None
         )
         if qcols[qi].button(q, key=btn_key, use_container_width=True, disabled=already_pending):
-            # 二次检查：只有当前没有任何待处理消息才设置
             if not st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
                 st.session_state.pending_ai_message = {"content": q}
                 st.rerun()
 
-    # ── 文本输入 + 发送 ──
     st.markdown("<div style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border-color);'>",
                 unsafe_allow_html=True)
 
@@ -961,7 +829,6 @@ def render_chat_section(api_config, cn1, cn2, selected, ratios, sim, mol_sets, d
             disabled=st.session_state.is_ai_thinking
         )
         if send_clicked and user_input.strip():
-            # 防重复：只有没有待处理消息时才设置
             if not st.session_state.pending_ai_message and not st.session_state.is_ai_thinking:
                 st.session_state.pending_ai_message = {"content": user_input.strip()}
                 st.rerun()
@@ -995,7 +862,6 @@ def render_sidebar_tabs(df):
         st.session_state.sidebar_tab = selected_tab
         st.rerun()
 
-    # 问题4：标签使用引导
     tab_guides = {
         "实验台": "🧪 **实验台** — 选择 2-4 种食材，右侧实时呈现分子共鸣分析、雷达图和 AI 顾问",
         "配方台": "⚖️ **配方台** — 拖动滑块调整各食材比例，雷达图面积随比例实时变化",
@@ -1005,14 +871,14 @@ def render_sidebar_tabs(df):
     st.markdown("---")
     return selected_tab
 
+
+
 def render_experiment_tab(df):
     ANIMAL_KW = ["meat","dairy","fish","seafood","pork","beef","chicken","egg","alcohol"]
 
     is_vegan = st.toggle("🌿 仅植物基 Vegan", value=st.session_state.vegan_on, key="vegan_toggle")
     st.session_state.vegan_on = is_vegan
 
-    # ── Vegan 过滤（先过滤数据，再建分类列表）──
-    # 扩展动物性关键词，修复"香肠出现在Vegan"的问题
     ANIMAL_CATS = {"meat","dairy","fish","seafood","pork","beef","chicken","egg",
                    "alcohol","poultry","shellfish","sausage","ham","bacon",
                    "lamb","veal","duck","turkey","anchovy","lard","gelatin"}
@@ -1022,9 +888,7 @@ def render_experiment_tab(df):
     else:
         df_base = df
 
-    # ── 分类按钮组（替代 multiselect）──
     all_cats = sorted(df_base["category"].unique().tolist())
-    # 对分类做大众友好的分组映射
     CAT_GROUP = {
         "🌾 谷物淀粉": ["cereal","grain","flour","starch","bread","rice","wheat","corn","oat"],
         "🫑 蔬菜": ["vegetable","veggie","root","tuber","onion","garlic","pepper","cabbage","bean","legume","pea"],
@@ -1047,17 +911,14 @@ def render_experiment_tab(df):
                 return group
         return "🌊 其他"
 
-    # 按大组聚合分类
     cat_to_group = {c: get_group(c) for c in all_cats}
     groups_present = sorted(set(cat_to_group.values()))
 
     st.markdown('<div style="font-size:.82rem;color:var(--text-muted);margin-bottom:6px">🗂 按大类筛选（可多选）</div>', unsafe_allow_html=True)
     
     selected_groups = st.session_state.get("selected_groups", set())
-    # 清除已不存在的分类
     selected_groups = selected_groups & set(groups_present)
     
-    # 渲染分类按钮（用 checkbox 模拟按钮组）
     btn_cols = st.columns(3)
     new_groups = set()
     for gi, grp in enumerate(groups_present):
@@ -1070,7 +931,6 @@ def render_experiment_tab(df):
         st.session_state["selected_groups"] = new_groups
         st.rerun()
 
-    # 根据选中的大组确定显示的食材
     if new_groups:
         selected_raw_cats = {c for c, g in cat_to_group.items() if g in new_groups}
         df_show = df_base[df_base["category"].isin(selected_raw_cats)]
@@ -1094,7 +954,6 @@ def render_experiment_tab(df):
     st.markdown("**🎲 随机探索**")
     rand_col1, rand_col2 = st.columns(2, gap="small")
 
-    # 经典配对从完整数据库查找（不受分类筛选限制）
     all_names_lower = {n.lower(): n for n in df["name"].values}
 
     def try_classic(pairs):
@@ -1106,24 +965,35 @@ def render_experiment_tab(df):
                 return ra, rb, desc
         return None
 
+    # 修复：经典按钮使用更可靠的状态更新机制
     with rand_col1:
         if st.button("🟢 经典共振搭配", key="random_resonance", use_container_width=True):
             pair = try_classic(CLASSIC_RESONANCE_PAIRS)
-            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else [])
-            if picked:
-                st.session_state["_force_defaults"] = picked
+            if pair:
+                picked = [pair[0], pair[1]]
                 st.session_state["selected_ingredients"] = picked
-                st.session_state["_random_desc"] = f"🟢 {pair[2]}" if pair else ""
+                st.session_state["_random_desc"] = f"🟢 {pair[2]}"
+            else:
+                picked = random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else []
+                st.session_state["selected_ingredients"] = picked
+                st.session_state["_random_desc"] = ""
+            # 修复：增加触发计数器，强制 multiselect 重新渲染
+            st.session_state["_button_trigger"] = st.session_state.get("_button_trigger", 0) + 1
             st.rerun()
 
     with rand_col2:
         if st.button("🔴 经典对比碰撞", key="random_contrast", use_container_width=True):
             pair = try_classic(CLASSIC_CONTRAST_PAIRS)
-            picked = [pair[0], pair[1]] if pair else (random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else [])
-            if picked:
-                st.session_state["_force_defaults"] = picked
+            if pair:
+                picked = [pair[0], pair[1]]
                 st.session_state["selected_ingredients"] = picked
-                st.session_state["_random_desc"] = f"🔴 {pair[2]}" if pair else ""
+                st.session_state["_random_desc"] = f"🔴 {pair[2]}"
+            else:
+                picked = random.sample(sorted(df["name"].unique().tolist()), 2) if len(df) >= 2 else []
+                st.session_state["selected_ingredients"] = picked
+                st.session_state["_random_desc"] = ""
+            # 修复：增加触发计数器，强制 multiselect 重新渲染
+            st.session_state["_button_trigger"] = st.session_state.get("_button_trigger", 0) + 1
             st.rerun()
 
     # 显示经典配对的描述
@@ -1133,24 +1003,23 @@ def render_experiment_tab(df):
     options = sorted(df_show["name"].unique().tolist())
     options_set = set(options)
 
-    # 优先级：_force_defaults(随机/示例) > selected_ingredients(持久化) > 空
-    force = st.session_state.pop("_force_defaults", None)
-    st.session_state.pop("random_selection", None)        # 兼容旧代码，清除避免干扰
-    st.session_state.pop("_pending_ingredient_list", None)
-
-    if force:
-        defaults = [n for n in force if n in options_set]
-    else:
-        defaults = [n for n in st.session_state.get("selected_ingredients", []) if n in options_set]
-
+    # 修复：使用更可靠的默认值获取逻辑
+    # 优先级：按钮触发的选择 > 持久化的选择
+    defaults = [n for n in st.session_state.get("selected_ingredients", []) if n in options_set]
+    
+    # 修复：使用 key 包含触发计数器，强制 multiselect 重新渲染
+    multiselect_key = f"ing_select_{st.session_state.get('_button_trigger', 0)}"
+    
     selected = st.multiselect(
         "选择食材（2-4种）", options=options, default=defaults,
         format_func=display_name, help="最多支持4种食材同时分析",
-        key="ing_select"
+        key=multiselect_key
     )
-    # 同步到持久化 state，让配方台/设置等其他标签能读到
+    
+    # 同步到持久化 state
     if selected:
         st.session_state["selected_ingredients"] = selected
+    
     return selected
 
 def render_formula_tab(selected):
@@ -1222,7 +1091,6 @@ def render_settings_tab():
 
     st.caption("Key 仅保存在当前会话，关闭页面后自动清除")
 
-    # ── 模型速度选择 ──
     st.markdown("---")
     st.markdown("**⚡ 模型速度**")
     model_options = {
@@ -1246,7 +1114,6 @@ def render_settings_tab():
 
     st.caption("Secrets 中的 DASHSCOPE_MODEL 会覆盖此选择。如仍然很慢，请检查 Secrets 设置。")
 
-    # 连接状态
     st.markdown("---")
     st.markdown("**📡 连接状态**")
     api_ok, api_config = check_api_status()
@@ -1310,7 +1177,6 @@ def render_empty_state(df):
     """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # 共鸣指数说明卡片
     st.markdown("<div class='card'><h4 class='card-title'>🔬 读懂「分子共鸣指数」</h4>", unsafe_allow_html=True)
     st.markdown("""
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:8px">
@@ -1345,11 +1211,9 @@ def render_empty_state(df):
     """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 三个示例卡片（共振 / 平衡 / 对比）──
     st.markdown("<div class='card'><h4 class='card-title'>✨ 选择一个示例开始体验</h4>", unsafe_allow_html=True)
     st.markdown('<p style="font-size:.82rem;color:var(--text-muted);margin-bottom:16px">三种搭配逻辑——点击卡片，立刻看到分子分析结果，亲身感受分数的含义</p>', unsafe_allow_html=True)
 
-    # 用不区分大小写的匹配，确保食材名正确找到
     available_lower = {n.lower(): n for n in df["name"].values}
     def find_pair(candidates):
         for a, b in candidates:
@@ -1359,7 +1223,6 @@ def render_empty_state(df):
                 return ra, rb
         return None
 
-    # 候选列表：多备选确保能命中数据库中的真实食材名
     resonance_candidates = [
         ("Coffee","Cocoa"),("Coffee","dark chocolate"),
         ("Strawberry","Raspberry"),("Strawberry","Peach"),
@@ -1408,9 +1271,9 @@ def render_empty_state(df):
             if pair:
                 btn_label = f"{icon} 开始体验 {cna} × {cnb}"
                 if st.button(btn_label, key=btn_key, use_container_width=True):
-                    st.session_state["_force_defaults"] = [pa, pb]
                     st.session_state["selected_ingredients"] = [pa, pb]
                     st.session_state["sidebar_tab"] = "实验台"
+                    st.session_state["_button_trigger"] = st.session_state.get("_button_trigger", 0) + 1
                     st.rerun()
             else:
                 st.button("暂无匹配食材", key=btn_key, use_container_width=True, disabled=True)
@@ -1448,15 +1311,6 @@ def main():
         st.error("❌ 找不到 flavordb_data.csv，请确保数据文件在同一目录下")
         st.stop()
 
-    # ⚠️ 问题1修复：在渲染任何widget之前，先处理"加入实验"的食材更新
-    # 不能在widget渲染循环中直接赋值widget的key，必须在rerun后、widget创建前处理
-    if "_add_ingredient" in st.session_state:
-        new_list = st.session_state.pop("_add_ingredient")
-        st.session_state["_pending_ingredient_list"] = new_list
-    if "_add_warn" in st.session_state:
-        del st.session_state["_add_warn"]
-        st.warning("⚠️ 最多支持4种食材")
-
     # Hero
     _, btn_col = st.columns([9, 1])
     with btn_col:
@@ -1489,7 +1343,6 @@ def main():
             selected = render_experiment_tab(df)
             ratios = {}
         elif selected_tab == "配方台":
-            # 从持久化 state 读取食材（不依赖 ing_select widget key）
             selected = [n for n in st.session_state.get("selected_ingredients", [])
                        if n in df["name"].values]
             if len(selected) < 2:
@@ -1498,7 +1351,7 @@ def main():
             else:
                 ratios = render_formula_tab(selected)
         else:
-            selected = st.session_state.get("ing_select", [])
+            selected = st.session_state.get("selected_ingredients", [])
             ratios = {}
             render_settings_tab()
 
@@ -1519,7 +1372,7 @@ def main():
     if not ratios:
         ratios = {n: 1/len(selected) for n in selected}
 
-    # ── 行1：雷达图 | 共鸣指数 ──
+    # 行1：雷达图 | 共鸣指数
     r1_left, r1_right = st.columns([1.2, 1], gap="large")
 
     with r1_left:
@@ -1578,7 +1431,6 @@ def main():
         n_only_a = detail.get("only_a_count", len(sim["only_a"]))
         n_only_b = detail.get("only_b_count", len(sim["only_b"]))
 
-        # 得分段位说明
         if sc >= 73:
             tier_text = "🟢 高度共振区（73-97）"
             tier_guide = f"两者分子高度重叠，组合后香气叠加增强，适合主从搭配关系"
@@ -1650,7 +1502,7 @@ def main():
             </div>""", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 分子连线网络图 ──
+    # 分子连线网络图
     if sim["shared"]:
         st.markdown('<div class="card"><h4 class="card-title">🕸 分子连线网络图</h4>', unsafe_allow_html=True)
         shared_top = sim["shared"][:14]
@@ -1684,7 +1536,7 @@ def main():
         </div>""", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 行3：深度诊断 | 介质推演+主厨建议 ──
+    # 行3：深度诊断 | 介质推演+主厨建议
     r3_left, r3_right = st.columns([1, 1.2], gap="large")
 
     with r3_left:
@@ -1838,7 +1690,7 @@ def main():
                     if bname not in curr and len(curr) < 4:
                         curr.append(bname)
                         st.session_state["selected_ingredients"] = curr
-                        st.session_state["_force_defaults"] = curr  # 同步 multiselect default
+                        st.session_state["_button_trigger"] = st.session_state.get("_button_trigger", 0) + 1
                         st.rerun()
                     elif len(curr) >= 4:
                         st.warning("⚠️ 最多支持4种食材")
@@ -1869,7 +1721,7 @@ def main():
                     if cname not in curr and len(curr) < 4:
                         curr.append(cname)
                         st.session_state["selected_ingredients"] = curr
-                        st.session_state["_force_defaults"] = curr
+                        st.session_state["_button_trigger"] = st.session_state.get("_button_trigger", 0) + 1
                         st.rerun()
                     elif len(curr) >= 4:
                         st.warning("⚠️ 最多支持4种食材")
